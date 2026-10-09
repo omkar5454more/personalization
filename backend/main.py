@@ -685,5 +685,7 @@ def demo(rest: str = ""):
 from backend.analytics import build_router  # noqa: E402  (needs db/current_user/owned_site defined above)
 
 app.include_router(build_router(db, current_user, owned_site))
-# must be last: a catch-all mount, so every API route above wins
-app.mount("/", StaticFiles(directory=PUBLIC, html=True), name="public")
+# must be last: a catch-all mount, so every API route above wins.
+# On Vercel public/ is served by the CDN and is NOT bundled into this function, so only mount it when present.
+if PUBLIC.is_dir():
+    app.mount("/", StaticFiles(directory=PUBLIC, html=True), name="public")
