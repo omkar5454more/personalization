@@ -253,7 +253,7 @@ function openCampaignModal(site, existing, opts = {}) {
     ${ruleRow(0)}${ruleRow(1)}
     <div class="row" style="margin-bottom:6px">
       ${sel("c-match", [["all", "All rules must match"], ["any", "Any rule can match"]], cfg ? cfg.match : "all", 'style="width:190px"')}
-      ${sel("c-freq", [["once", "Show once per visitor"], ["session", "Once per visit"], ["always", "Every page load"]], cfg ? cfg.frequency : "once", 'style="width:190px"')}
+      ${sel("c-freq", [["once", "Show once per visitor"], ["session", "Once per visit"], ["always", "Every page load"]], cfg ? cfg.frequency : (type0 === "visual" ? "always" : "once"), 'style="width:190px"')}
       <input id="c-url" type="text" class="grow" placeholder="Only on URLs containing… (blank = all)" value="${esc(cfg ? cfg.url_contains : "")}"></div>
     <div class="muted" style="font-size:12.5px;margin-bottom:14px">A <b>visit</b> is a new session — 30 minutes after the previous page view. “Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
 
@@ -292,7 +292,8 @@ function openCampaignModal(site, existing, opts = {}) {
       <div class="row"><input id="vz-url" type="text" class="grow" placeholder="https://yoursite.com/page" value="${esc(suggestPageUrl(site))}">
         <button class="btn primary" type="button" id="vz-open">✎ Open page in editor</button></div>
       <div class="muted" id="vz-msg" style="font-size:12.5px;margin:6px 0 10px">Your page opens with an editing toolbar. Click any text, image or button to change it (use <b>↑ Parent</b> to pick a whole banner), then press <b>Done</b>.
-        Visitors never see the editor, only the changed page — and only if they match “Who should see it?” above.</div>
+        Visitors never see the editor, only the changed page — and only if they match “Who should see it?” above.
+        Tip: leave <b>Show</b> on “Every page load” so the edits stay on the page, and set “Only on URLs containing…” (e.g. <code>/index.html</code>) to limit them to this page.</div>
       <div class="lbl2">Changes <span class="muted" id="vz-count"></span></div><div id="vz-list"></div>
     </div>
     <div class="lbl2" style="margin:16px 0 6px">3 · Preview it on your page</div>
@@ -331,6 +332,10 @@ function openCampaignModal(site, existing, opts = {}) {
     $("#c-tv-wrap", el).style.visibility = tr === "delay" || tr === "scroll" ? "visible" : "hidden";
     $("#c-tv-label", el).textContent = tr === "scroll" ? "Scroll depth (%)" : "Seconds";
   };
+  // Page edits should apply on every page load; "once per visitor" would make them vanish after the first view.
+  let freqTouched = !!existing;
+  $("#c-freq", el).addEventListener("change", () => { freqTouched = true; });
+  $("#c-type", el).addEventListener("change", () => { if (!freqTouched) $("#c-freq", el).value = $("#c-type", el).value === "visual" ? "always" : "once"; });
   $("#c-type", el).onchange = syncType; $("#c-display", el).onchange = syncCustom; $("#c-trigger", el).onchange = syncCustom;
   syncType(); syncCustom(); showEd("html");
   $$("[data-ed]", el).forEach(b => b.onclick = () => showEd(b.dataset.ed));
