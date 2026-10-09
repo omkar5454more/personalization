@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f6e7d2"/><stop offset="1" stop-color="#e9c9a0"/></linearGradient>
+  <linearGradient id="bag" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2f4a3a"/><stop offset=".5" stop-color="#3d6150"/><stop offset="1" stop-color="#2a4234"/></linearGradient></defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <ellipse cx="300" cy="520" rx="170" ry="22" fill="#000" opacity=".18"/>
+  <path d="M170 150 L430 150 L452 500 Q452 520 430 520 L170 520 Q148 520 148 500 Z" fill="url(#bag)"/>
+  <path d="M170 150 L430 150 L424 190 L176 190 Z" fill="#244033"/>
+  <rect x="190" y="118" width="220" height="36" rx="6" fill="#d9a066"/>
+  <rect x="200" y="260" width="200" height="150" rx="10" fill="#f6efe2"/>
+  <text x="300" y="320" text-anchor="middle" font-family="Georgia, serif" font-size="30" font-weight="700" fill="#2f4a3a">AURORA</text>
+  <text x="300" y="352" text-anchor="middle" font-family="Georgia, serif" font-size="18" fill="#6b3f2a">House Blend</text>
+  <text x="300" y="386" text-anchor="middle" font-family="Arial, sans-serif" font-size="13" fill="#6b3f2a" letter-spacing="2">WHOLE BEAN · 250 G</text>
+  <g fill="#4a2a1b"><ellipse cx="500" cy="545" rx="22" ry="14" transform="rotate(25 500 545)"/><ellipse cx="540" cy="520" rx="22" ry="14" transform="rotate(-20 540 520)"/><ellipse cx="90" cy="540" rx="22" ry="14" transform="rotate(-30 90 540)"/></g>
+</svg>

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f7dcd2"/><stop offset="1" stop-color="#eebba8"/></linearGradient></defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <ellipse cx="300" cy="500" rx="190" ry="26" fill="#000" opacity=".16"/>
+  <path d="M150 230 H420 L404 440 Q400 480 360 480 H210 Q170 480 166 440 Z" fill="#fbf7f0"/>
+  <path d="M420 262 H452 Q500 262 500 330 Q500 398 448 398 H408" fill="none" stroke="#fbf7f0" stroke-width="24" stroke-linecap="round"/>
+  <ellipse cx="285" cy="230" rx="135" ry="22" fill="#6b3f2a"/>
+  <ellipse cx="285" cy="230" rx="135" ry="22" fill="none" stroke="#efe5d6" stroke-width="8"/>
+  <path d="M232 226 q20 -10 40 0 q20 10 40 0" fill="none" stroke="#e7c9a0" stroke-width="6" stroke-linecap="round" opacity=".8"/>
+  <g fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" opacity=".75">
+    <path d="M230 190 C 206 160 254 140 230 104"/><path d="M290 190 C 268 156 314 136 292 96"/><path d="M345 190 C 326 164 360 148 342 116"/>
+  </g>
+  <text x="285" y="372" text-anchor="middle" font-family="Georgia, serif" font-size="34" font-weight="700" fill="#b05a3c">aurora</text>
+</svg>

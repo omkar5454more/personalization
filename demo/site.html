@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aurora Coffee — demo site</title>
+<!-- The Optimize snippet is injected from ?site=SITE_ID (and optional &sdk=ORIGIN) so this demo works for any site you create. -->
+<script>
+  var q = new URLSearchParams(location.search), site = q.get("site");
+  if (site) {
+    document.write('<style id="ot-hide">body{opacity:0!important}</style>');
+    setTimeout(function () { var h = document.getElementById("ot-hide"); h && h.remove(); }, 1500);
+    document.write('<script src="' + encodeURI(q.get("sdk") || "") + '/sdk.js" data-site="' + encodeURIComponent(site) + '" async><\/script>');
+  }
+</script>
+<style>
+  :root { --ink:#2a1d1a; --muted:#6f5f58; --cream:#fbf6ef; --accent:#b05a3c; --accent-dark:#8d4529; --green:#2f4a3a; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.6 Georgia, "Times New Roman", serif; color:var(--ink); background:var(--cream); }
+  h1,h2,h3,.sans,nav,button,.btn,input,label { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  a { color: inherit; }
+  header.top { display:flex; justify-content:space-between; align-items:center; padding:18px 40px; background:var(--cream); border-bottom:1px solid #eadfce; position:sticky; top:0; z-index:5; }
+  .logo { font:700 22px Georgia, serif; letter-spacing:.5px; color:var(--green); text-decoration:none; }
+  nav { display:flex; gap:26px; font-size:15px; } nav a { text-decoration:none; color:var(--muted); } nav a:hover { color:var(--accent); }
+  .hero { position:relative; min-height:520px; display:flex; align-items:center; color:#fff;
+          background:#2b1b3d url("/demo-assets/hero.svg") center/cover no-repeat; }
+  .hero::after { content:""; position:absolute; inset:0; background:linear-gradient(90deg, rgba(25,12,30,.72), rgba(25,12,30,.15) 70%); }
+  .hero .inner { position:relative; z-index:1; max-width:1100px; margin:0 auto; padding:0 40px; width:100%; }
+  .hero h1 { font-size:clamp(34px,5vw,60px); line-height:1.1; margin:0 0 14px; max-width:620px; letter-spacing:-.02em; }
+  .hero p { font-size:19px; max-width:520px; margin:0 0 26px; opacity:.92; }
+  .btn { display:inline-block; background:var(--accent); color:#fff; padding:13px 26px; border-radius:999px; text-decoration:none; font-weight:600; border:0; cursor:pointer; font-size:16px; }
+  .btn:hover { background:var(--accent-dark); } .btn.ghost { background:transparent; border:2px solid #fff; margin-left:10px; }
+  main { max-width:1100px; margin:0 auto; padding:0 40px; }
+  section { padding:64px 0; }
+  h2 { font-size:30px; margin:0 0 8px; letter-spacing:-.01em; color:var(--green); }
+  .lead { color:var(--muted); margin:0 0 28px; max-width:560px; }
+  .grid { display:grid; grid-template-columns:repeat(3,1fr); gap:26px; }
+  .card { background:#fff; border-radius:16px; overflow:hidden; box-shadow:0 2px 14px rgba(70,40,20,.08); display:flex; flex-direction:column; }
+  .card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; }
+  .card .body { padding:18px 20px 22px; display:flex; flex-direction:column; gap:6px; flex:1; }
+  .card h3 { margin:0; font-size:18px; } .price { color:var(--accent); font-weight:700; font-family:system-ui,sans-serif; }
+  .card .btn { margin-top:auto; text-align:center; padding:10px 16px; font-size:15px; }
+  .story { display:grid; grid-template-columns:1fr 1fr; gap:48px; align-items:center; }
+  .story img { width:100%; border-radius:18px; box-shadow:0 8px 28px rgba(70,40,20,.18); }
+  #newsletter-slot { background:#fff; border:2px dashed #e3d3bd; border-radius:16px; padding:28px; text-align:center; color:var(--muted); }
+  footer { background:var(--green); color:#d8e4dc; padding:36px 40px; text-align:center; font:14px system-ui,sans-serif; }
+  @media (max-width:800px){ .grid{grid-template-columns:1fr} .story{grid-template-columns:1fr} header.top{padding:14px 18px} main{padding:0 18px} .hero .inner{padding:0 18px} nav{gap:14px} }
+
+  /* demo-only helper panel */
+  #demo-ctl { position:fixed; left:16px; bottom:16px; z-index:2147482000; background:#14181f; color:#e8ecf3; border-radius:12px; padding:12px 14px; width:260px;
+              font:13px/1.45 system-ui,sans-serif; box-shadow:0 8px 30px rgba(0,0,0,.35); }
+  #demo-ctl b { color:#fff; } #demo-ctl .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  #demo-ctl button { background:#2b3342; color:#fff; border:1px solid #3b4558; border-radius:8px; padding:6px 10px; cursor:pointer; font:inherit; }
+  #demo-ctl button:hover { background:#374156; } #demo-ctl .muted { color:#9aa6bb; font-size:12px; }
+  #demo-ctl .x { position:absolute; right:8px; top:4px; background:none; border:0; font-size:18px; padding:0 4px; }
+</style>
+</head>
+<body>
+  <header class="top">
+    <a class="logo" href="#">☕ Aurora Coffee</a>
+    <nav><a href="#shop">Shop</a><a href="#story">Our story</a><a href="#club">Coffee club</a><a href="#" id="cart-link">Cart (0)</a></nav>
+  </header>
+
+  <!-- Hero banner: background image + overlay text. Great target for the visual editor (h1, p, buttons). -->
+  <section class="hero" id="hero" aria-label="Featured offer">
+    <div class="inner">
+      <h1 id="hero-title">Small-batch coffee, roasted at sunrise</h1>
+      <p id="hero-sub">Single-origin beans, roasted to order and delivered fresh to your door within 48 hours.</p>
+      <a class="btn" id="hero-cta" href="#shop">Shop the roasts</a><a class="btn ghost" id="hero-secondary" href="#story">Our story</a>
+    </div>
+  </section>
+
+  <main>
+    <section id="shop">
+      <h2>This week’s favourites</h2>
+      <p class="lead">Hand-picked beans and brewing gear from our roastery.</p>
+      <div class="grid">
+        <article class="card"><img src="/demo-assets/product-beans.svg" alt="Aurora House Blend coffee beans bag" width="600" height="600">
+          <div class="body"><h3>House Blend — 250 g</h3><span class="price">$14</span><p>Chocolate, toasted almond and a caramel finish.</p><button class="btn add-to-cart" data-item="House Blend">Add to cart</button></div></article>
+        <article class="card"><img src="/demo-assets/product-pourover.svg" alt="Pour-over brewing set" width="600" height="600">
+          <div class="body"><h3>Pour-over set</h3><span class="price">$38</span><p>Glass carafe, ceramic dripper and 100 filters.</p><button class="btn add-to-cart" data-item="Pour-over set">Add to cart</button></div></article>
+        <article class="card"><img src="/demo-assets/product-mug.svg" alt="Aurora ceramic mug" width="600" height="600">
+          <div class="body"><h3>Ceramic mug</h3><span class="price">$18</span><p>Hand-glazed, dishwasher safe, 350 ml.</p><button class="btn add-to-cart" data-item="Ceramic mug">Add to cart</button></div></article>
+      </div>
+    </section>
+
+    <section id="story" class="story">
+      <div><h2>From farm to cup in two days</h2><p>We buy directly from small farms and roast every order the morning it ships. No warehouses, no stale beans, just coffee at its best.</p>
+        <a class="btn" href="#club">Join the coffee club</a></div>
+      <img src="/demo-assets/hero.svg" alt="Sunrise over the hills with a steaming cup" width="1600" height="640" loading="lazy">
+    </section>
+
+    <section id="club">
+      <h2>Join the coffee club</h2>
+      <p class="lead">Get 10% off your first order and early access to new roasts.</p>
+      <!-- Empty slot: a campaign set to "Inline" with selector #newsletter-slot renders its form here. -->
+      <div id="newsletter-slot">Newsletter slot — an Optimize campaign can place a form here.</div>
+    </section>
+  </main>
+
+  <footer>© Aurora Coffee (demo site for Optimize) · This is a fake store for testing personalization, A/B tests, heatmaps and funnels.</footer>
+
+  <!-- Demo-only controls so you do not have to wait 30 minutes between "visits". Ignored by tracking. -->
+  <div id="demo-ctl" data-ot-ignore="1">
+    <button class="x" id="dc-x" aria-label="Hide demo controls">×</button>
+    <div><b>Demo controls</b></div>
+    <div id="dc-state" class="muted">Loading Optimize…</div>
+    <div class="row"><button id="dc-next">Simulate next visit</button><button id="dc-reset">Reset visitor</button></div>
+    <div class="muted" style="margin-top:8px">A “visit” = a new session (30 min after the last page view). “Simulate” back-dates the last visit so the next load counts as a new one.</div>
+  </div>
+
+  <script>
+    (function () {
+      var STORE = "_ot_v1";
+      function readState() { try { return JSON.parse(localStorage.getItem(STORE)); } catch (e) { return null; } }
+      function writeState(s) {
+        var raw = JSON.stringify(s);
+        try { localStorage.setItem(STORE, raw); } catch (e) {}
+        document.cookie = "_ot=" + encodeURIComponent(raw) + ";max-age=31536000;path=/;SameSite=Lax";
+      }
+      function show() {
+        var el = document.getElementById("dc-state");
+        if (!site) { el.textContent = "Add ?site=YOUR_SITE_ID to the URL to load the Optimize snippet."; return; }
+        if (!window.OT) { el.textContent = "Waiting for Optimize… (consent required? call OT.consent(true))"; return; }
+        var v = OT.visitor;
+        el.innerHTML = "Visit <b>#" + v.visitNo + "</b> · " + (v.isReturning ? "returning" : "new") + " visitor<br>id " + v.id.slice(0, 8);
+      }
+      setInterval(show, 700); show();
+      // The SDK saves its in-memory state on pagehide, which would undo our change. Registering our
+      // listener later means ours runs last and wins.
+      function afterSdkSaves(fn) { window.addEventListener("pagehide", fn); location.reload(); }
+      document.getElementById("dc-next").onclick = function () {
+        afterSdkSaves(function () {
+          var s = readState(); if (!s) return;
+          s.last = Date.now() - 31 * 60 * 1000; writeState(s);
+        });
+      };
+      document.getElementById("dc-reset").onclick = function () {
+        afterSdkSaves(function () {
+          try { localStorage.removeItem(STORE); localStorage.removeItem("_ot_consent"); } catch (e) {}
+          document.cookie = "_ot=;max-age=0;path=/";
+        });
+      };
+      document.getElementById("dc-x").onclick = function () { document.getElementById("demo-ctl").style.display = "none"; };
+      // tiny fake cart so "Add to cart" is a real, trackable click and a custom event
+      var n = 0;
+      document.querySelectorAll(".add-to-cart").forEach(function (b) {
+        b.addEventListener("click", function () {
+          n++; document.getElementById("cart-link").textContent = "Cart (" + n + ")";
+          if (window.OT) OT.track("add_to_cart", { item: b.getAttribute("data-item") });
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

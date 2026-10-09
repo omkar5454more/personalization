@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#e3eef0"/><stop offset="1" stop-color="#b9d3d6"/></linearGradient></defs>
+  <rect width="600" height="600" fill="url(#bg)"/>
+  <ellipse cx="300" cy="528" rx="170" ry="20" fill="#000" opacity=".15"/>
+  <!-- carafe -->
+  <path d="M220 330 H380 L400 500 Q402 524 378 524 H222 Q198 524 200 500 Z" fill="#fff" opacity=".55" stroke="#8fb1b6" stroke-width="5"/>
+  <path d="M212 430 H388 L398 500 Q400 516 380 516 H220 Q200 516 202 500 Z" fill="#6b3f2a" opacity=".85"/>
+  <!-- dripper -->
+  <path d="M190 210 H410 L350 330 H250 Z" fill="#f4f1ea" stroke="#cfc8b8" stroke-width="5"/>
+  <g stroke="#cfc8b8" stroke-width="4"><path d="M240 230 L272 322"/><path d="M285 230 L295 322"/><path d="M330 230 L318 322"/><path d="M372 230 L342 322"/></g>
+  <rect x="226" y="196" width="148" height="20" rx="8" fill="#e8e2d4"/>
+  <!-- kettle stream -->
+  <path d="M470 120 Q500 120 490 160 L470 190 L520 160" fill="none" stroke="#b05a3c" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" opacity="0"/>
+  <path d="M300 60 C 300 120 296 160 300 200" fill="none" stroke="#8a5a3c" stroke-width="7" stroke-linecap="round" stroke-dasharray="2 12" opacity=".7"/>
+  <rect x="270" y="30" width="60" height="22" rx="11" fill="#2f4a3a"/>
+  <circle cx="300" cy="545" r="0" fill="none"/>
+</svg>
