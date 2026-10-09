@@ -38,7 +38,7 @@ function openAddSite() {
 }
 
 // ---------------------------------------------------------------- visual editor bridge
-const EDITOR = { win: null, changes: [], onChange: null };
+const EDITOR = { win: null, changes: [], onChange: null, siteId: null };
 const EDIT_ACTIONS = ["text", "html", "css", "attr", "hide"];
 const validChange = c => c && typeof c.selector === "string" && c.selector.length <= 500 && EDIT_ACTIONS.includes(c.action)
   && typeof c.value === "string" && c.value.length <= 5000;
@@ -54,11 +54,28 @@ window.addEventListener("message", e => {
     EDITOR.changes = m.changes.filter(validChange).slice(0, 200).map(cleanChange);
     if (EDITOR.onChange) EDITOR.onChange();
   }
+  else if (m.type === "ot:upload") handleEditorUpload(e, m);
 });
+
+// The editor runs on the customer's site (no login there), so it hands image files to us and we upload them with the
+// user's session. The reply goes only to the window that asked, at its own origin, and carries just a public URL.
+async function handleEditorUpload(e, m) {
+  const reply = r => { try { e.source.postMessage({ type: "ot:upload:result", id: m.id, ...r }, e.origin); } catch { /* window gone */ } };
+  if (!(m.blob instanceof Blob) || !EDITOR.siteId) return reply({ ok: false, error: "Upload isn't available here." });
+  try {
+    const r = await fetch(`/api/sites/${EDITOR.siteId}/images`, {
+      method: "POST", body: m.blob,
+      headers: { "Content-Type": m.blob.type, "X-Filename": encodeURIComponent(String(m.name || "image").slice(0, 80)) },
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) return reply({ ok: false, error: typeof d.detail === "string" ? d.detail : `Upload failed (${r.status})` });
+    reply({ ok: true, url: location.origin + d.url });     // absolute, so it works on the customer's domain
+  } catch (err) { reply({ ok: false, error: "Upload failed: " + err.message }); }
+}
 
 // ---------------------------------------------------------------- new A/B test
 function openNewExperiment(site) {
-  EDITOR.changes = [];
+  EDITOR.changes = []; EDITOR.siteId = site.id;
   let lastUrl = "";
   try { lastUrl = localStorage.getItem("ot_last_url_" + site.id) || ""; } catch { /* ignore */ }
   if (!lastUrl && site.domain) lastUrl = "https://" + site.domain + "/";
@@ -350,6 +367,7 @@ function openCampaignModal(site, existing, opts = {}) {
   };
 
   // ---- "Change the page": the real-page editor feeds EDITOR.changes; saved as one `change` action per edit
+  EDITOR.siteId = site.id;
   EDITOR.changes = (existing && cfg.actions.every(a => a.type === "change"))
     ? cfg.actions.map(a => ({ selector: a.selector, action: a.action, value: a.value || "", attr: a.attr || "" })) : [];
   const describeChange = c => c.action === "attr" && c.attr === "src" ? "Replace image" : c.action === "attr" ? `Set ${c.attr}` : c.action === "css" && /background-image/.test(c.value) ? "Background image"

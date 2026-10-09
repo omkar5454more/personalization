@@ -29,7 +29,7 @@ TURSO_URL = _clean_env("TURSO_DATABASE_URL")
 TURSO_TOKEN = _clean_env("TURSO_AUTH_TOKEN")
 USING_TURSO = bool(TURSO_URL)
 LOCAL_PATH = Path(os.getenv("DATA_DB_PATH") or ROOT / "data.db")
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 # Final schema. (Local databases created by older versions get the missing columns via _migrate_local.)
 SCHEMA = [
@@ -42,12 +42,14 @@ SCHEMA = [
     "CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, site_id TEXT, name TEXT, status TEXT, config TEXT, created REAL)",
     "CREATE TABLE IF NOT EXISTS funnels (id TEXT PRIMARY KEY, site_id TEXT, name TEXT, steps TEXT, created REAL)",
     "CREATE TABLE IF NOT EXISTS login_attempts (k TEXT, ts REAL)",
+    "CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, site_id TEXT, user_id TEXT, mime TEXT, size INTEGER, name TEXT, data BLOB, created REAL)",
     "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)",
     "CREATE INDEX IF NOT EXISTS ix_ev_site_ts ON events(site_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_ev_exp ON events(exp_id, type, variant)",
     "CREATE INDEX IF NOT EXISTS ix_ev_vis ON events(site_id, visitor_id, ts)",
     "CREATE INDEX IF NOT EXISTS ix_ev_type ON events(site_id, type, ts)",
     "CREATE INDEX IF NOT EXISTS ix_login_k ON login_attempts(k, ts)",
+    "CREATE INDEX IF NOT EXISTS ix_img_site ON images(site_id)",
 ]
 
 

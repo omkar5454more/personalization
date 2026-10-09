@@ -318,6 +318,73 @@ def create_site(body: SiteIn, user=Depends(current_user)):
     return {"id": sid, "name": body.name, "domain": domain}
 
 
+# ---------------------------------------------------------------- image uploads (for the page editor)
+# Images live in the database (BLOB) and are served publicly, immutably cached by the CDN, at /img/<id>.<ext>.
+# Only PNG/JPEG/WebP/GIF are accepted (never SVG: it can carry scripts), the bytes must match the declared type,
+# and the response is served with nosniff + a sandboxing CSP so it can never run as a page.
+IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+MAX_IMAGE_BYTES = 2_000_000
+MAX_IMAGES_PER_SITE = 200
+
+
+def image_bytes_match(mime: str, data: bytes) -> bool:
+    if mime == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if mime == "image/gif":
+        return data.startswith((b"GIF87a", b"GIF89a"))
+    if mime == "image/webp":
+        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return False
+
+
+@app.post("/api/sites/{site_id}/images")
+async def upload_image(site_id: str, request: Request, user=Depends(current_user)):
+    """Raw image bytes in the body (Content-Type: image/png|jpeg|webp|gif). Returns a relative URL."""
+    mime = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if mime not in IMAGE_TYPES:
+        raise HTTPException(415, "Use a PNG, JPG, WebP or GIF image")
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > MAX_IMAGE_BYTES + 2048:
+        raise HTTPException(413, f"Image is too large (max {MAX_IMAGE_BYTES // 1_000_000} MB)")
+    data = await request.body()
+    if not data:
+        raise HTTPException(422, "empty file")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, f"Image is too large (max {MAX_IMAGE_BYTES // 1_000_000} MB)")
+    if not image_bytes_match(mime, data):
+        raise HTTPException(422, "the file's contents don't match its image type")
+    from urllib.parse import unquote
+    name = re.sub(r"[^\w.\- ]", "", unquote(request.headers.get("x-filename") or "image"))[:80] or "image"
+    iid = secrets.token_urlsafe(12)
+    with db() as con:
+        owned_site(con, site_id, user)
+        if con.execute("SELECT COUNT(*) c FROM images WHERE site_id=?", (site_id,)).fetchone()["c"] >= MAX_IMAGES_PER_SITE:
+            raise HTTPException(429, "This site has reached its limit of 200 uploaded images")
+        con.execute("INSERT INTO images (id,site_id,user_id,mime,size,name,data,created) VALUES (?,?,?,?,?,?,?,?)",
+                    (iid, site_id, user["id"], mime, len(data), name, data, time.time()))
+    return {"id": iid, "url": f"/img/{iid}.{IMAGE_TYPES[mime]}", "size": len(data)}
+
+
+@app.get("/img/{name}")
+def serve_image(name: str):
+    iid = name.rsplit(".", 1)[0]
+    with db() as con:
+        row = con.execute("SELECT mime, data FROM images WHERE id=?", (iid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "image not found")
+    return Response(content=bytes(row["data"]), media_type=row["mime"], headers={
+        "Cache-Control": "public, max-age=31536000, s-maxage=31536000, immutable",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    })
+
+
 # ---------------------------------------------------------------- one-click demo site
 DEMO_NAME = "Aurora Coffee (demo)"
 DEMO_FORM_HTML = """<h3 style="margin:0 0 6px">Join the coffee club</h3>

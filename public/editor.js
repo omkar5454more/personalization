@@ -11,6 +11,38 @@
   var entries = []; // {change, undo}
   var selected = null, hovered = null, handshakeDone = false;
 
+  // ---------------------------------------------------------------- image upload (via the dashboard)
+  // This page is a customer's site, so it holds no login. The file goes to the dashboard window that opened us
+  // (postMessage), which uploads it with the user's session and sends back a public URL.
+  var pendingUploads = {};
+  function prepareImage(file) {
+    return new Promise(function (resolve, reject) {
+      if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return reject(new Error("Use a PNG, JPG, WebP or GIF image"));
+      if (file.type === "image/gif") return file.size <= 1500000 ? resolve(file) : reject(new Error("GIFs must be under 1.5 MB"));
+      var url = URL.createObjectURL(file), im = new Image();
+      im.onload = function () {
+        URL.revokeObjectURL(url);
+        var w = im.naturalWidth, h = im.naturalHeight, k = Math.min(1, 1600 / Math.max(w, h));
+        if (k === 1 && file.size <= 600000) return resolve(file);          // already small: keep the original bytes
+        var c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+        c.getContext("2d").drawImage(im, 0, 0, c.width, c.height);
+        var type = file.type === "image/png" ? "image/png" : file.type === "image/webp" ? "image/webp" : "image/jpeg";
+        c.toBlob(function (b) { b ? resolve(b) : reject(new Error("Could not process the image")); }, type, 0.86);
+      };
+      im.onerror = function () { URL.revokeObjectURL(url); reject(new Error("That file isn't a readable image")); };
+      im.src = url;
+    });
+  }
+  function uploadBlob(blob, name) {
+    return new Promise(function (resolve, reject) {
+      if (!opener || opener.closed) return reject(new Error("The dashboard window was closed. Reopen the editor from the dashboard."));
+      var id = Math.random().toString(36).slice(2);
+      pendingUploads[id] = { resolve: resolve, reject: reject, t: setTimeout(function () { delete pendingUploads[id]; reject(new Error("Upload timed out")); }, 40000) };
+      opener.postMessage({ type: "ot:upload", id: id, name: name || "image", blob: blob }, ORIGIN);
+    });
+  }
+
   // ---------------------------------------------------------------- selectors
   function esc(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^\w-]/g, "\\$&"); }
   function stableClass(c) {
@@ -137,10 +169,12 @@
       '<div class="row" style="margin-top:6px"><button id="a-style" class="pri">Apply style</button><button id="a-hide">Hide element</button></div>' +
       (isLink ? '<hr><label>Link URL</label><input id="f-href" type="text"><div class="row" style="margin-top:6px"><button id="a-href" class="pri">Apply link</button></div>' : '') +
       (isImg ? '<hr><label>Image URL (replaces this image)</label><input id="f-img" type="text" placeholder="https://…/photo.jpg">' +
-        '<label>Alt text</label><input id="f-alt" type="text"><div class="row" style="margin-top:6px"><button id="a-img" class="pri">Apply image</button></div>' : '') +
+        '<label>Alt text</label><input id="f-alt" type="text"><div class="row" style="margin-top:6px"><button id="a-img" class="pri">Apply image</button><button id="u-img">&#x2B06; Upload</button>' +
+        '<input id="u-img-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden></div>' : '') +
       '<hr><label>Background image URL</label><input id="f-bgimg" type="text" placeholder="https://…/banner.jpg">' +
       '<div class="muted">For a banner or section whose picture is a CSS background. Tip: use &uarr; Parent to select the whole banner.</div>' +
-      '<div class="row" style="margin-top:6px"><button id="a-bgimg">Apply background</button></div>' +
+      '<div class="row" style="margin-top:6px"><button id="a-bgimg">Apply background</button><button id="u-bg">&#x2B06; Upload</button>' +
+      '<input id="u-bg-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden></div>' +
       '<details><summary>Edit HTML</summary><textarea id="f-html"></textarea><div class="row" style="margin-top:6px"><button id="a-html">Apply HTML</button></div></details>' +
       '<hr><b>Changes (<span id="cnt"></span>)</b><ul id="list"></ul>';
     $("#selTxt").textContent = sel;
@@ -205,6 +239,28 @@
       addChange({ selector: sel, action: "css", value: 'background-image:url("' + v + '") !important;background-size:cover !important;background-position:center !important;', attr: "" });
       select(selected);
     };
+    // upload from the computer, then fill the URL box and apply it
+    function wireUpload(btnSel, fileSel, urlSel, applySel) {
+      var btn = $(btnSel), input = $(fileSel);
+      if (!btn || !input) return;
+      btn.onclick = function () { input.click(); };
+      input.onchange = function () {
+        var f = input.files && input.files[0]; input.value = "";
+        if (!f) return;
+        $("#hint").textContent = "Preparing image\u2026";
+        prepareImage(f).then(function (blob) {
+          $("#hint").textContent = "Uploading " + Math.max(1, Math.round(blob.size / 1024)) + " KB\u2026";
+          return uploadBlob(blob, f.name);
+        }).then(function (url) {
+          var box = $(urlSel);
+          if (!box) return;                                        // the panel changed while uploading
+          box.value = url; $(applySel).click();
+          $("#hint").textContent = "Uploaded and applied.";
+        }).catch(function (err) { $("#hint").textContent = (err && err.message) || "Upload failed"; });
+      };
+    }
+    if (isImg) wireUpload("#u-img", "#u-img-file", "#f-img", "#a-img");
+    wireUpload("#u-bg", "#u-bg-file", "#f-bgimg", "#a-bgimg");
     renderList();
   }
   function renderList() {
@@ -266,6 +322,11 @@
     // Only trust the dashboard window that opened us, at the tool's own origin.
     if (e.source !== opener || e.origin !== ORIGIN) return;
     var m = e.data;
+    if (m && m.type === "ot:upload:result" && pendingUploads[m.id]) {
+      var p = pendingUploads[m.id]; delete pendingUploads[m.id]; clearTimeout(p.t);
+      if (m.ok && typeof m.url === "string") p.resolve(m.url); else p.reject(new Error(String(m.error || "Upload failed")));
+      return;
+    }
     if (!m || m.type !== "ot:init" || handshakeDone || !Array.isArray(m.changes)) return;
     handshakeDone = true;
     m.changes.slice(0, 200).forEach(function (c) {

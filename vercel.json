@@ -24,6 +24,10 @@
     {
       "source": "/sdk/:file",
       "destination": "/api/index?__p=/sdk/:file"
+    },
+    {
+      "source": "/img/:file",
+      "destination": "/api/index?__p=/img/:file"
     }
   ],
   "headers": [

@@ -59,6 +59,8 @@ Notes
 - Personalization also has **Change the page**: open your real page in the visual editor, click any text / image / button
                    (replace an image URL, set a background image, edit text/links, hide things) and show those changes only to the
                    audience you choose (e.g. returning visitors). Visitors never see the editor or any visit counters.
+                   **Image upload:** in the editor, ⬆ Upload sends a file (PNG/JPG/WebP/GIF, resized to max 1600 px, <= 2 MB) to the
+                   dashboard, which stores it in the database and returns a public `/img/<id>` link that is applied for you.
 - Behavior         pages, clicks (+rage clicks), scroll depth, forms (start vs submit)
 - Heatmaps         click heatmap + scroll map per page and device; schematic in the dashboard, or painted over
                    your real page via "Open page with heatmap" (SDK opens in overlay mode, no tracking)
@@ -105,5 +107,8 @@ nothing is stored/sent until `OT.consent(true)`; `OT.consent(false)` deletes the
   approximate (filter by device).
 - Funnels are computed on read from raw events (fine for MVP volumes; pre-aggregate for large sites). The dashboard makes
   several database round-trips per page; with a hosted database expect ~100-400 ms page loads.
+- Uploaded images live in the database (BLOB, 2 MB each, 200 per site) and are served through the function/CDN with
+  immutable caching; for heavy image use move them to object storage (e.g. Vercel Blob / S3). SVG uploads are refused on purpose.
+  A site CSP with `img-src` must allow this tool's domain.
 - No session recordings or data export yet.
 - `python seed_demo_data.py` adds 60 SYNTHETIC visitors to the local test site (`--remove` deletes them).
