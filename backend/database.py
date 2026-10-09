@@ -13,14 +13,20 @@ Both backends expose the same tiny interface used across the app:
 """
 import base64
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TURSO_URL = os.getenv("TURSO_DATABASE_URL", "").strip()
-TURSO_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+def _clean_env(name):
+    # tolerate quotes / stray whitespace copied from a dashboard or a shell command
+    return os.getenv(name, "").strip().strip("\"'").strip()
+
+
+TURSO_URL = _clean_env("TURSO_DATABASE_URL")
+TURSO_TOKEN = _clean_env("TURSO_AUTH_TOKEN")
 USING_TURSO = bool(TURSO_URL)
 LOCAL_PATH = Path(os.getenv("DATA_DB_PATH") or ROOT / "data.db")
 SCHEMA_VERSION = "3"
@@ -113,6 +119,27 @@ def _decode(cell):
 
 _client = None
 _client_lock = threading.Lock()
+_HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:\d+)?$")
+
+
+def turso_base_url():
+    """libsql://db-org.turso.io -> https://db-org.turso.io, or a clear error if the value is not a real address."""
+    url = TURSO_URL
+    for prefix in ("libsql://", "wss://", "ws://"):
+        if url.startswith(prefix):
+            url = ("https://" if prefix != "ws://" else "http://") + url[len(prefix):]
+            break
+    if not url.startswith(("https://", "http://")):
+        url = "https://" + url
+    host = url.split("://", 1)[1].split("/", 1)[0]
+    if not host or "..." in host or not _HOST_RE.match(host):
+        raise DatabaseError(
+            f"TURSO_DATABASE_URL looks wrong (got host '{host}'). It should look like "
+            "libsql://your-database-your-org.turso.io -- copy the real URL from the Turso dashboard, "
+            "not the '...' placeholder.")
+    if not TURSO_TOKEN or "..." in TURSO_TOKEN:
+        raise DatabaseError("TURSO_AUTH_TOKEN is missing or still a placeholder. Generate a token in the Turso dashboard.")
+    return url.rstrip("/")
 
 
 def _http():
@@ -121,8 +148,7 @@ def _http():
         with _client_lock:
             if _client is None:
                 import httpx  # imported lazily: not needed for local SQLite development
-                base = TURSO_URL.replace("libsql://", "https://", 1).rstrip("/")
-                _client = httpx.Client(base_url=base, timeout=25.0,
+                _client = httpx.Client(base_url=turso_base_url(), timeout=25.0,
                                        headers={"Authorization": f"Bearer {TURSO_TOKEN}", "Content-Type": "application/json"})
     return _client
 
@@ -133,8 +159,9 @@ class TursoConn:
     def _pipeline(self, stmts):
         reqs = [{"type": "execute", "stmt": {"sql": sql, "args": [_encode(a) for a in (params or ())]}} for sql, params in stmts]
         reqs.append({"type": "close"})
+        client = _http()                            # raises DatabaseError with a clear message if misconfigured
         try:
-            r = _http().post("/v2/pipeline", json={"baton": None, "requests": reqs})
+            r = client.post("/v2/pipeline", json={"baton": None, "requests": reqs})
         except Exception as e:  # network / TLS / timeout
             raise DatabaseError(f"could not reach the database: {e}") from e
         if r.status_code != 200:
@@ -217,8 +244,10 @@ def ensure_ready():
             try:
                 row = con.execute("SELECT v FROM meta WHERE k='schema'").fetchone()
                 current = row["v"] if row else None
-            except DatabaseError:
-                current = None                      # meta table does not exist yet
+            except DatabaseError as e:
+                if "no such table" not in str(e).lower():
+                    raise                           # bad URL / token / network: say so instead of hiding it
+                current = None                      # meta table does not exist yet: first run
             if current != SCHEMA_VERSION:
                 con.batch([(sql, ()) for sql in SCHEMA])
                 con.execute("INSERT INTO meta (k, v) VALUES ('schema', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (SCHEMA_VERSION,))
