@@ -318,6 +318,70 @@ def create_site(body: SiteIn, user=Depends(current_user)):
     return {"id": sid, "name": body.name, "domain": domain}
 
 
+# ---------------------------------------------------------------- one-click demo site
+DEMO_NAME = "Aurora Coffee (demo)"
+DEMO_FORM_HTML = """<h3 style="margin:0 0 6px">Join the coffee club</h3>
+<p style="margin:0 0 12px;color:#555">Welcome back! Get 10% off your first order.</p>
+<form id="club-form">
+  <input type="email" name="email" placeholder="you@example.com" required>
+  <button type="submit">Get my 10% off</button>
+</form>
+<p class="thanks" hidden>Thanks! Check your inbox for the code.</p>
+"""
+DEMO_FORM_CSS = """{{container}} input { width: 100%; padding: 11px; margin-bottom: 10px; border: 1px solid #cfc6bb; border-radius: 8px; font-size: 15px; box-sizing: border-box; }
+{{container}} button[type=submit] { width: 100%; padding: 12px; border: 0; border-radius: 999px; background: #b05a3c; color: #fff; font-weight: 600; font-size: 15px; cursor: pointer; }
+{{container}} .thanks { color: #2f4a3a; font-weight: 600; }
+"""
+DEMO_FORM_JS = """var form = container.querySelector("form");
+form.addEventListener("submit", function (e) {
+  e.preventDefault();
+  form.hidden = true;
+  container.querySelector(".thanks").hidden = false;
+  OT.track("club_signup");
+});
+"""
+
+
+@app.post("/api/demo-site")
+def create_demo_site(request: Request, user=Depends(current_user)):
+    """Creates (once per account) the Aurora Coffee demo site with a 3rd-visit form, a welcome-back banner and a funnel,
+    all running, so the whole tool can be tried in one click. Returns the demo store URL."""
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(":")[0]
+    try:
+        domain = clean_domain(host)
+    except HTTPException:
+        domain = "localhost" if host.startswith("127.") else ""
+    with db() as con:
+        row = con.execute("SELECT id FROM sites WHERE user_id=? AND name=?", (user["id"], DEMO_NAME)).fetchone()
+        if row:
+            return {"id": row["id"], "created": False, "demo_url": f"/site-demo?site={row['id']}"}
+        sid, now = new_id("site"), time.time()
+        third = CampaignIn(
+            name="3rd-visit signup form", frequency="once", match="all",
+            rules=[Rule(field="visit_no", op="gte", value="3")],
+            actions=[Action(type="custom", html=DEMO_FORM_HTML, css=DEMO_FORM_CSS, js=DEMO_FORM_JS,
+                            display="modal", trigger="delay", trigger_value=2)])
+        banner = CampaignIn(
+            name="Welcome-back banner", frequency="session", match="all",
+            rules=[Rule(field="returning", op="eq", value="true")],
+            actions=[Action(type="banner", text="Welcome back! Free shipping on orders over $30.", position="top",
+                            bg="#2f4a3a", fg="#ffffff", cta_text="Shop now", cta_url="/site-demo")])
+        for c in (third, banner):
+            validate_campaign(c)
+        funnel_steps = [{"type": "page", "value": "site-demo", "match": "contains", "label": ""},
+                        {"type": "event", "value": "add_to_cart", "match": "contains", "label": "Added to cart"},
+                        {"type": "event", "value": "club_signup", "match": "contains", "label": "Joined the club"}]
+        stmts = [
+            ("INSERT INTO sites (id,name,domain,created,user_id,settings) VALUES (?,?,?,?,?,?)",
+             (sid, DEMO_NAME, domain, now, user["id"], json.dumps(DEFAULT_SETTINGS))),
+            ("INSERT INTO funnels VALUES (?,?,?,?,?)", (new_id("fun"), sid, "Visit -> cart -> club", json.dumps(funnel_steps), now)),
+        ]
+        for c in (third, banner):
+            stmts.append(("INSERT INTO campaigns VALUES (?,?,?,?,?,?)", (new_id("cmp"), sid, c.name, "running", c.model_dump_json(), now)))
+        con.batch(stmts)
+    return {"id": sid, "created": True, "demo_url": f"/site-demo?site={sid}"}
+
+
 @app.get("/api/sites/{site_id}")
 def get_site_detail(site_id: str, user=Depends(current_user)):
     with db() as con:

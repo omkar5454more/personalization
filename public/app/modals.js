@@ -495,3 +495,24 @@ async function openNewFunnel(site) {
     catch (e) { $("#f-err", el).textContent = e.message; }
   };
 }
+
+
+// ---------------------------------------------------------------- one-click demo site
+async function createDemoSite(btn) {
+  const label = btn.textContent; btn.disabled = true; btn.textContent = "Creating…";
+  try {
+    const d = await api("/api/demo-site", { method: "POST" });
+    await loadSites();
+    const url = location.origin + d.demo_url;
+    const m = openModal(d.created ? "Demo site created" : "Your demo site", `
+      <p style="margin-top:0">${d.created ? "Aurora Coffee (demo) is ready, with these already running:" : "You already have the demo site. It has:"}</p>
+      <ul style="margin:0 0 14px;padding-left:20px"><li><b>3rd-visit signup form</b> — a popup form shown on a visitor's 3rd visit</li>
+        <li><b>Welcome-back banner</b> — for returning visitors</li><li><b>Funnel</b> — visit → add to cart → join the club</li></ul>
+      <div class="callout"><b>Try the 3rd-visit form:</b> open the demo store, then press <b>Simulate next visit</b> twice in the little “Demo controls” box (bottom-left).
+        On visit #3 the form pops up after ~2 seconds.</div>
+      <div class="row" style="margin-top:14px"><a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">Open the demo store ↗</a>
+        <button class="btn" id="demo-go">Go to the dashboard for this site</button></div>`);
+    $("#demo-go", m.el).onclick = () => { m.close(); location.hash = `#/site/${d.id}/overview`; };
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; btn.textContent = label; }
+}

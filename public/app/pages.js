@@ -68,7 +68,7 @@ async function pageSites(view) {
   const connected = sites.filter(s => s.status === "live" || s.status === "receiving").length;
   view.innerHTML = `<div class="page-head"><div><h1>All sites</h1>
     <div class="sub">Every website connected to Optimize. Pick a site to see its visitors, run A/B tests and personalization campaigns.</div></div>
-    <button class="btn primary" id="add-site">＋ Add site</button></div>
+    <div class="row"><button class="btn" id="add-demo">✦ Create demo site</button><button class="btn primary" id="add-site">＋ Add site</button></div></div>
     <div class="grid g4" style="margin-bottom:16px">
       ${kpi("Sites", fmtNum(sites.length))}
       ${kpi("Receiving data", fmtNum(connected), "last 24 hours")}
@@ -83,13 +83,15 @@ async function pageSites(view) {
         <td>${counts(s.experiments)}</td><td>${counts(s.campaigns)}</td><td class="muted nowrap">${ago(s.last_event)}</td>
         <td class="right"><span class="btn sm">Open →</span></td></tr>`).join("")}</tbody></table></div>`
       : `<div class="empty"><b>No sites yet</b>Add your website to get a tracking snippet, then paste it into the page &lt;head&gt;.<br><br>
-         <button class="btn primary" id="add-site-2">＋ Add your first site</button></div>`}</div>
+         <button class="btn primary" id="add-demo-2">✦ Create the demo site (one click)</button> <button class="btn" id="add-site-2">＋ Add your own site</button>
+         <div class="muted" style="margin-top:10px;font-size:12.5px">The demo is a fake coffee store with a ready-made “3rd visit” signup form, a banner and a funnel — the quickest way to see everything work.</div></div>`}</div>
     ${sites.length ? `<div class="callout" style="margin-top:16px"><b>Where do I do what?</b>
       Open a site, then use its menu on the left: <b>Overview</b> (traffic) · <b>A/B tests</b> (compare versions, with a point-and-click editor) ·
       <b>Personalization</b> (banners/popups by visitor type) · <b>Behavior</b> (pages, clicks, scroll depth, forms) ·
       <b>Visitors</b> (what each person did) · <b>Install &amp; settings</b> (snippet, tracking, consent).</div>` : ""}`;
   $$("[data-open]", view).forEach(r => r.onclick = () => { location.hash = `#/site/${r.dataset.open}/overview`; });
   ["#add-site", "#add-site-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = openAddSite; });
+  ["#add-demo", "#add-demo-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => createDemoSite(b); });
 }
 function counts(o) {
   const run = o.running || 0, total = Object.values(o).reduce((a, b) => a + b, 0);
