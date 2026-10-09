@@ -234,9 +234,6 @@ def build_router(db, current_user, owned_site) -> APIRouter:
                             "props": json.loads(x["props"] or "{}")} for x in rows]}
 
     # ------------------------------------------------------------------ heatmaps
-    with db() as _c:
-        _c.execute("CREATE TABLE IF NOT EXISTS funnels (id TEXT PRIMARY KEY, site_id TEXT, name TEXT, steps TEXT, created REAL)")
-
     @r.get("/heatmap")
     def heatmap(site_id: str, path: str, days: int = 14, device: str = "", user=Depends(current_user)):
         """Click density bins + scroll-reach curve for one page. Bins are 2% of page width x 25px tall."""
@@ -313,7 +310,7 @@ def build_router(db, current_user, owned_site) -> APIRouter:
             rows = con.execute(
                 "SELECT visitor_id, ts, type, name, url, is_returning, props FROM events "
                 "WHERE site_id=? AND ts>=? AND type IN ('pageview','autoclick','event','form') "
-                "ORDER BY visitor_id, ts LIMIT 400000", (site_id, since))
+                "ORDER BY visitor_id, ts LIMIT 150000", (site_id, since))
             n = len(steps)
             reached = [0] * n
             by_seg = {"new": [0] * n, "returning": [0] * n}

@@ -1,0 +1,23 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/demo/:path*", "destination": "/demo.html" },
+    { "source": "/site-demo/:path*", "destination": "/site-demo.html" },
+    { "source": "/api/:path*", "destination": "/api/index" },
+    { "source": "/collect", "destination": "/api/index" },
+    { "source": "/ctx", "destination": "/api/index" },
+    { "source": "/sdk/:file", "destination": "/api/index" }
+  ],
+  "headers": [
+    {
+      "source": "/(sdk|editor|heatmap).js",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=300, s-maxage=3600" },
+        { "key": "Access-Control-Allow-Origin", "value": "*" }
+      ]
+    }
+  ],
+  "functions": {
+    "api/index.py": { "maxDuration": 30 }
+  }
+}

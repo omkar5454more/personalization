@@ -1,7 +1,7 @@
 .venv/
 data.db
 data.db-*
-server.log
+*.log
 __pycache__/
 *.pyc
 .vercel/

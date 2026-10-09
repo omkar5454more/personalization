@@ -2,20 +2,18 @@
 
 Serves: the SDK + per-site config to client websites, the /collect event
 endpoint, a small JSON API for the dashboard, and the dashboard itself.
-Storage is SQLite (zero setup); swap for Postgres/ClickHouse when traffic grows.
+Storage: SQLite locally, Turso (hosted libSQL) in production -- see backend/database.py.
 """
 import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
-import sqlite3
 import time
-from collections import defaultdict
-from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,71 +21,24 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = ROOT / "data.db"
+from backend.database import ROOT, DatabaseError, db
+
+PUBLIC = ROOT / "public"      # static site: dashboard, SDK scripts, demo (served by Vercel's CDN in production)
 
 app = FastAPI(title="Optimize")
-# The SDK runs on arbitrary customer origins, so CORS must be open for the
-# public endpoints. The dashboard API is same-origin and unauthenticated in
-# this MVP (local use only) — add auth before exposing it.
+# The SDK runs on arbitrary customer origins, so CORS must be open for the public endpoints
+# (/collect, /sdk/<id>.json). The dashboard API is same-origin and cookie-authenticated.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-@contextmanager
-def db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    try:
-        yield con
-        con.commit()
-    finally:
-        con.close()
-
-
-def init_db():
-    with db() as con:
-        con.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS sites (
-                id TEXT PRIMARY KEY, name TEXT, domain TEXT, created REAL);
-            CREATE TABLE IF NOT EXISTS experiments (
-                id TEXT PRIMARY KEY, site_id TEXT, name TEXT, status TEXT,
-                config TEXT, created REAL);
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                site_id TEXT, ts REAL, visitor_id TEXT, session_id TEXT,
-                type TEXT, name TEXT, url TEXT, exp_id TEXT, variant TEXT,
-                visit_no INTEGER, is_returning INTEGER, props TEXT);
-            CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY, email TEXT UNIQUE, salt TEXT, pw_hash TEXT, created REAL);
-            CREATE TABLE IF NOT EXISTS sessions (
-                token_hash TEXT PRIMARY KEY, user_id TEXT, created REAL);
-            CREATE TABLE IF NOT EXISTS campaigns (
-                id TEXT PRIMARY KEY, site_id TEXT, name TEXT, status TEXT,
-                config TEXT, created REAL);
-            CREATE INDEX IF NOT EXISTS ix_ev_site_ts ON events(site_id, ts);
-            CREATE INDEX IF NOT EXISTS ix_ev_exp ON events(exp_id, type, variant);
-            """
-        )
-
-
-init_db()
-with db() as _con:  # lightweight migrations for columns added after v1
-    def _cols(t):
-        return [r["name"] for r in _con.execute(f"PRAGMA table_info({t})")]
-    if "user_id" not in _cols("sites"):
-        _con.execute("ALTER TABLE sites ADD COLUMN user_id TEXT")
-    if "settings" not in _cols("sites"):
-        _con.execute("ALTER TABLE sites ADD COLUMN settings TEXT")
-    if "host" not in _cols("events"):
-        _con.execute("ALTER TABLE events ADD COLUMN host TEXT")
-    _con.execute("CREATE INDEX IF NOT EXISTS ix_ev_vis ON events(site_id, visitor_id, ts)")
-    _con.execute("CREATE INDEX IF NOT EXISTS ix_ev_type ON events(site_id, type, ts)")
+@app.exception_handler(DatabaseError)
+async def database_error(request: Request, exc: DatabaseError):
+    return JSONResponse({"detail": f"Database problem: {exc}"}, status_code=503)
 
 
 # ---------------------------------------------------------------- models
 DEFAULT_SETTINGS = {"auto_clicks": True, "auto_scroll": True, "auto_forms": True,
-                    "auto_spa": True, "consent_required": False}
+                    "auto_spa": True, "consent_required": False, "restrict_origin": False}
 HOST_RE = re.compile(r"^(localhost|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(:\d{1,5})?$")
 
 
@@ -183,7 +134,13 @@ def validate_experiment(e: ExperimentIn):
 # ---------------------------------------------------------------- auth
 SESSION_COOKIE = "ot_session"
 SESSION_TTL = 30 * 86400
-_attempts: dict[str, list[float]] = defaultdict(list)
+COOKIE_SECURE = bool(os.getenv("VERCEL")) or os.getenv("COOKIE_SECURE") == "1"   # Vercel is HTTPS-only
+
+
+def client_ip(request: Request) -> str:
+    # behind Vercel/Cloudflare the real client is in a forwarded header
+    fwd = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip") or ""
+    return (fwd.split(",")[0].strip() or (request.client.host if request.client else "?"))[:64]
 
 
 def _hash_pw(password: str, salt: str) -> str:
@@ -192,10 +149,13 @@ def _hash_pw(password: str, salt: str) -> str:
 
 def _throttle(key: str, limit: int = 8, window: int = 300):
     now = time.time()
-    _attempts[key] = [t for t in _attempts[key] if now - t < window]
-    if len(_attempts[key]) >= limit:
-        raise HTTPException(429, "too many attempts, try again in a few minutes")
-    _attempts[key].append(now)
+    with db() as con:
+        n = con.execute("SELECT COUNT(*) c FROM login_attempts WHERE k=? AND ts>?", (key, now - window)).fetchone()["c"]
+        if n >= limit:
+            raise HTTPException(429, "too many attempts, try again in a few minutes")
+        con.execute("INSERT INTO login_attempts (k, ts) VALUES (?, ?)", (key, now))
+        if secrets.randbelow(25) == 0:   # opportunistic cleanup
+            con.execute("DELETE FROM login_attempts WHERE ts<?", (now - 3600,))
 
 
 class Creds(BaseModel):
@@ -208,10 +168,10 @@ def _start_session(con, user_id: str, response: Response):
     # Only a hash of the token is stored, so a leaked DB can't be replayed as sessions.
     con.execute("INSERT INTO sessions VALUES (?,?,?)",
                 (hashlib.sha256(token.encode()).hexdigest(), user_id, time.time()))
-    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_TTL, httponly=True, samesite="lax", path="/")
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_TTL, httponly=True, samesite="lax", path="/", secure=COOKIE_SECURE)
 
 
-def current_user(request: Request) -> sqlite3.Row:
+def current_user(request: Request) -> Any:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(401, "not logged in")
@@ -228,7 +188,7 @@ def current_user(request: Request) -> sqlite3.Row:
 
 @app.post("/api/auth/register")
 def register(body: Creds, request: Request, response: Response):
-    _throttle("reg:" + (request.client.host if request.client else "?"))
+    _throttle("reg:" + client_ip(request))
     email = body.email.strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         raise HTTPException(422, "invalid email")
@@ -237,6 +197,9 @@ def register(body: Creds, request: Request, response: Response):
         if con.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
             raise HTTPException(409, "email already registered")
         first_user = con.execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 0
+        # On a public deployment set ALLOW_SIGNUPS=0 after creating your own account, so strangers can't register.
+        if not first_user and os.getenv("ALLOW_SIGNUPS", "1") == "0":
+            raise HTTPException(403, "sign-ups are closed on this server")
         con.execute("INSERT INTO users VALUES (?,?,?,?,?)", (uid, email, salt, _hash_pw(body.password, salt), time.time()))
         if first_user:  # sites created before auth existed go to the first account
             con.execute("UPDATE sites SET user_id=? WHERE user_id IS NULL", (uid,))
@@ -247,7 +210,7 @@ def register(body: Creds, request: Request, response: Response):
 @app.post("/api/auth/login")
 def login(body: Creds, request: Request, response: Response):
     email = body.email.strip().lower()
-    _throttle("login:" + (request.client.host if request.client else "?") + email)
+    _throttle("login:" + client_ip(request) + email)
     with db() as con:
         u = con.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         ok = u and hmac.compare_digest(_hash_pw(body.password, u["salt"]), u["pw_hash"])
@@ -263,7 +226,7 @@ def logout(request: Request, response: Response):
     if token:
         with db() as con:
             con.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(SESSION_COOKIE, path="/", secure=COOKIE_SECURE, httponly=True, samesite="lax")
     return {"ok": True}
 
 
@@ -272,14 +235,14 @@ def me(user=Depends(current_user)):
     return {"email": user["email"]}
 
 
-def owned_site(con, site_id: str, user) -> sqlite3.Row:
+def owned_site(con, site_id: str, user) -> Any:
     row = con.execute("SELECT * FROM sites WHERE id=? AND user_id=?", (site_id, user["id"])).fetchone()
     if not row:  # same answer for "missing" and "someone else's" -- don't leak existence
         raise HTTPException(404, "site not found")
     return row
 
 
-def owned_experiment(con, exp_id: str, user) -> sqlite3.Row:
+def owned_experiment(con, exp_id: str, user) -> Any:
     row = con.execute(
         "SELECT e.* FROM experiments e JOIN sites s ON s.id=e.site_id WHERE e.id=? AND s.user_id=?",
         (exp_id, user["id"])).fetchone()
@@ -288,7 +251,7 @@ def owned_experiment(con, exp_id: str, user) -> sqlite3.Row:
     return row
 
 
-def owned_campaign(con, cid: str, user) -> sqlite3.Row:
+def owned_campaign(con, cid: str, user) -> Any:
     row = con.execute(
         "SELECT c.* FROM campaigns c JOIN sites s ON s.id=c.site_id WHERE c.id=? AND s.user_id=?",
         (cid, user["id"])).fetchone()
@@ -601,13 +564,15 @@ def visitor_context(request: Request):
 @app.get("/sdk/{site_id}.json")
 def sdk_config(site_id: str):
     with db() as con:
-        site_row = get_site(con, site_id)
-        rows = con.execute(
-            "SELECT id, config FROM experiments WHERE site_id=? AND status='running'", (site_id,)
-        ).fetchall()
-        crows = con.execute(
-            "SELECT id, config FROM campaigns WHERE site_id=? AND status='running'", (site_id,)
-        ).fetchall()
+        site_c, exp_c, camp_c = con.multi([
+            ("SELECT * FROM sites WHERE id=?", (site_id,)),
+            ("SELECT id, config FROM experiments WHERE site_id=? AND status='running'", (site_id,)),
+            ("SELECT id, config FROM campaigns WHERE site_id=? AND status='running'", (site_id,)),
+        ])
+        site_row = site_c.fetchone()
+        if not site_row:
+            raise HTTPException(404, "site not found")
+        rows, crows = exp_c.fetchall(), camp_c.fetchall()
     exps = []
     for r in rows:
         cfg = json.loads(r["config"])
@@ -618,27 +583,9 @@ def sdk_config(site_id: str):
         cfg = json.loads(r["config"])
         cfg["id"] = r["id"]
         camps.append(cfg)
-    # Short cache so a status change propagates quickly; put a CDN in front later.
+    # Cached 60s at the CDN (s-maxage) so a busy site doesn't hit the function/database on every pageview.
     return JSONResponse({"site": site_id, "settings": site_settings(site_row), "experiments": exps, "campaigns": camps},
-                        headers={"Cache-Control": "public, max-age=60"})
-
-
-@app.get("/sdk.js")
-def sdk_js():
-    return FileResponse(ROOT / "sdk" / "sdk.js", media_type="application/javascript",
-                        headers={"Cache-Control": "public, max-age=300"})
-
-
-@app.get("/heatmap.js")
-def heatmap_js():
-    return FileResponse(ROOT / "sdk" / "heatmap.js", media_type="application/javascript",
-                        headers={"Cache-Control": "public, max-age=300"})
-
-
-@app.get("/editor.js")
-def editor_js():
-    return FileResponse(ROOT / "sdk" / "editor.js", media_type="application/javascript",
-                        headers={"Cache-Control": "public, max-age=300"})
+                        headers={"Cache-Control": "public, max-age=60, s-maxage=60, stale-while-revalidate=300"})
 
 
 MAX_BATCH = 50
@@ -660,11 +607,24 @@ def clean_props(raw) -> str:
     return json.dumps(out)
 
 
+MAX_BODY = 200_000
+
+
+def origin_allowed(origin: str, domain: str) -> bool:
+    """True if the request's Origin host is the site's domain or a subdomain of it (www., app., ...)."""
+    host = (urlparse(origin).hostname or "").lower()
+    d = domain.lower().split(":")[0]
+    return bool(host) and (host == d or host.endswith("." + d))
+
+
 @app.post("/collect")
 async def collect(request: Request):
     # sendBeacon posts text/plain, so parse the raw body rather than rely on content-type.
+    raw = await request.body()
+    if len(raw) > MAX_BODY:
+        raise HTTPException(413, "payload too large")
     try:
-        payload = json.loads(await request.body())
+        payload = json.loads(raw)
     except ValueError:
         raise HTTPException(400, "bad json")
     if not isinstance(payload, dict):
@@ -676,8 +636,16 @@ async def collect(request: Request):
     host = str(payload.get("host") or "")[:100]
     country = request.headers.get("cf-ipcountry") or request.headers.get("x-vercel-ip-country")
     with db() as con:
-        if not con.execute("SELECT 1 FROM sites WHERE id=?", (site_id,)).fetchone():
+        site = con.execute("SELECT domain, settings FROM sites WHERE id=?", (site_id,)).fetchone()
+        if not site:
             raise HTTPException(404, "unknown site")
+        # Optional, best-effort abuse guard: drop events whose browser Origin isn't the site's domain.
+        # (Anyone can forge the header outside a browser, so this stops casual copy-paste misuse, not attackers.)
+        origin = request.headers.get("origin") or ""
+        if origin and site["domain"] and site_settings(site).get("restrict_origin") and not origin_allowed(origin, site["domain"]):
+            return Response(status_code=204)
+        now = time.time()
+        stmts = []
         for e in events[:MAX_BATCH]:
             if not isinstance(e, dict) or not e.get("vid") or e.get("type") not in EVENT_TYPES:
                 continue
@@ -688,37 +656,34 @@ async def collect(request: Request):
                 visit_no = int(e.get("visit_no") or 1)
             except (TypeError, ValueError):
                 visit_no = 1
-            con.execute(
+            stmts.append((
                 "INSERT INTO events (site_id,ts,visitor_id,session_id,type,name,url,exp_id,"
                 "variant,visit_no,is_returning,props,host) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (site_id, time.time(), str(e["vid"])[:64], str(e.get("sid", ""))[:64],
+                (site_id, now, str(e["vid"])[:64], str(e.get("sid", ""))[:64],
                  e["type"], str(e.get("name", ""))[:100], str(e.get("url", ""))[:500],
                  str(e["exp"])[:40] if e.get("exp") else None, str(e["variant"])[:40] if e.get("variant") else None,
-                 visit_no, 1 if e.get("returning") else 0, clean_props(props), host),
-            )
+                 visit_no, 1 if e.get("returning") else 0, clean_props(props), host)))
+        con.batch(stmts)
     return Response(status_code=204)
 
 
-# ---------------------------------------------------------------- static
-@app.get("/")
-def dashboard():
-    return FileResponse(ROOT / "dashboard" / "index.html")
-
-
+# ---------------------------------------------------------------- static (local dev)
+# In production Vercel serves public/ from its CDN before requests ever reach this function
+# (see vercel.json). These routes make `uvicorn backend.main:app` behave the same locally.
 @app.get("/site-demo")
 @app.get("/site-demo/{rest:path}")
 def site_demo(rest: str = ""):
-    return FileResponse(ROOT / "demo" / "site.html")
+    return FileResponse(PUBLIC / "site-demo.html")
 
 
 @app.get("/demo")
 @app.get("/demo/{rest:path}")
 def demo(rest: str = ""):
-    return FileResponse(ROOT / "demo" / "index.html")
+    return FileResponse(PUBLIC / "demo.html")
 
 
 from backend.analytics import build_router  # noqa: E402  (needs db/current_user/owned_site defined above)
 
 app.include_router(build_router(db, current_user, owned_site))
-app.mount("/app", StaticFiles(directory=ROOT / "dashboard"), name="dashboard-assets")
-app.mount("/demo-assets", StaticFiles(directory=ROOT / "demo" / "assets"), name="demo-assets")
+# must be last: a catch-all mount, so every API route above wins
+app.mount("/", StaticFiles(directory=PUBLIC, html=True), name="public")

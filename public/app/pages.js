@@ -324,6 +324,7 @@ async function pageSettings(view) {
       ${sw("auto_spa", "Single-page-app navigation", "Count route changes (React, Next.js, Vue…) as page views.")}</div>
     <div class="card card-pad"><h2>5 · Privacy &amp; cookies</h2>
       ${sw("consent_required", "Require consent before tracking", "When on, nothing is stored or sent until your cookie banner calls <code>OT.consent(true)</code>. Recommended for EU/UK visitors.")}
+      ${sw("restrict_origin", "Only accept events from my domain", "Ignores events sent from other websites. Best-effort protection against someone copying your snippet; needs the Domain above to be set (subdomains such as www. are allowed).")}
       <p class="muted" style="margin-bottom:6px">Optimize sets one first-party cookie (<code>_ot</code>, 1 year) and mirrors it in localStorage to recognise returning visitors. No IP address is stored.</p>
       <div class="snippet"><pre>// from your cookie banner
 OT.consent(true);   // accepted: start tracking
