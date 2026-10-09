@@ -537,8 +537,8 @@ class Action(BaseModel):
     fg: str = "#ffffff"
     selector: str = ""      # change, or the target element for custom/inline
     action: str = "text"    # change: text | html | css | attr | hide
-    value: str = ""
-    attr: str = ""
+    value: str = Field(default="", max_length=20000)
+    attr: str = Field(default="", max_length=50)
     # custom code (type == "custom"): runs on the visitor's page, like a tag manager
     html: str = Field(default="", max_length=50000)
     css: str = Field(default="", max_length=50000)
@@ -561,6 +561,8 @@ class CampaignIn(BaseModel):
 def validate_campaign(c: CampaignIn):
     if not c.actions:
         raise HTTPException(422, "add at least one action")
+    if len(c.actions) > 100:
+        raise HTTPException(422, "too many actions (max 100)")
     if c.match not in {"all", "any"} or c.frequency not in {"once", "session", "always"}:
         raise HTTPException(422, "bad match/frequency")
     for r in c.rules:
@@ -583,6 +585,8 @@ def validate_campaign(c: CampaignIn):
             continue
         if a.type == "change" and (not a.selector or a.action not in {"text", "html", "css", "attr", "hide"}):
             raise HTTPException(422, "change action needs selector and a valid action")
+        if a.type == "change" and a.action == "attr" and not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9:_-]{0,49}", a.attr or ""):
+            raise HTTPException(422, "attribute changes need a valid attribute name")
         if a.cta_url and not re.match(r"^(https?://|/)", a.cta_url):
             raise HTTPException(422, "cta_url must start with http(s):// or /")
         if a.type in {"banner", "popup"} and not (a.text or a.title):

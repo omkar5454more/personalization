@@ -21,7 +21,7 @@ scripts/check_db.py   verifies your Turso credentials before deploying
     .venv\Scripts\pip install -r requirements-dev.txt
     .venv\Scripts\python -m uvicorn backend.main:app --port 8010
     http://127.0.0.1:8010                              dashboard (create an account on first visit)
-    http://127.0.0.1:8010/site-demo?site=<SITE_ID>     Aurora Coffee demo store (demo controls simulate the 2nd/3rd visit)
+    http://127.0.0.1:8010/site-demo?site=<SITE_ID>     Aurora Coffee demo store (add &controls=1 for a test-only box that simulates the 2nd/3rd visit; visitors never see it)
 
 ## Deploy to Vercel (Hobby works for personal/testing use)
 Vercel functions have no persistent disk, so production uses **Turso** (hosted SQLite/libSQL). The SQL is unchanged.
@@ -56,6 +56,9 @@ Notes
                    Google Forms, Mailchimp/pasted form, plain form), sandboxed preview, display as popup /
                    slide-in / inline at a CSS selector, and triggers (immediately, delay, scroll %, exit intent).
                    Campaigns can be edited after creation. Impressions, interactions and form conversions are counted.
+- Personalization also has **Change the page**: open your real page in the visual editor, click any text / image / button
+                   (replace an image URL, set a background image, edit text/links, hide things) and show those changes only to the
+                   audience you choose (e.g. returning visitors). Visitors never see the editor or any visit counters.
 - Behavior         pages, clicks (+rage clicks), scroll depth, forms (start vs submit)
 - Heatmaps         click heatmap + scroll map per page and device; schematic in the dashboard, or painted over
                    your real page via "Open page with heatmap" (SDK opens in overlay mode, no tracking)

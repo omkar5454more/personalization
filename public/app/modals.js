@@ -211,9 +211,9 @@ ${safeJs}
 }catch(e){document.body.insertAdjacentHTML("beforeend","<pre style='color:#b42318;white-space:pre-wrap'>JavaScript error: "+String(e.message).replace(/</g,"&lt;")+"</pre>")}})(document.getElementById("${cid}"),{track:function(){},visitor:{}},{conversion:function(){},close:function(){},container:null});<\/script></body></html>`;
 }
 
-function openNewCampaign(site) { openCampaignModal(site, null); }
+function openNewCampaign(site, opts) { openCampaignModal(site, null, opts || {}); }
 
-function openCampaignModal(site, existing) {
+function openCampaignModal(site, existing, opts = {}) {
   const cfg = existing ? existing.config : null;
   const act = cfg ? cfg.actions[0] : null;
   const fields = [["returning", "Returning visitor (true/false)"], ["visit_no", "Visit number"], ["days_since_last", "Days since last visit"], ["days_since_first", "Days since first visit"],
@@ -226,7 +226,7 @@ function openCampaignModal(site, existing) {
     <select id="c-f${i}" style="width:230px"><option value="">${i ? "(optional) another rule" : "(everyone)"}</option>${fields.map(([k, l]) => `<option value="${k}" ${rule(i).field === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
     ${sel("c-o" + i, ops, rule(i).op, 'style="width:100px"')}<input id="c-v${i}" type="text" class="grow" placeholder="value e.g. true, 3, google, mobile" value="${esc(rule(i).value)}"></div>`;
   const v = (k, d = "") => (act && act[k] != null && act[k] !== "" ? act[k] : d);
-  const type0 = act ? act.type : "banner";
+  const type0 = act ? (act.type === "change" ? "visual" : act.type) : (opts.visual ? "visual" : "banner");
 
   const m = openModal(existing ? "Edit campaign" : "New personalization campaign", `
     <div class="field"><label for="c-name">Campaign name</label><input id="c-name" type="text" placeholder="3rd-visit signup form" value="${esc(cfg ? cfg.name : "")}"></div>
@@ -241,7 +241,7 @@ function openCampaignModal(site, existing) {
     <div class="muted" style="font-size:12.5px;margin-bottom:14px">A <b>visit</b> is a new session — 30 minutes after the previous page view. “Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
 
     <div class="lbl2" style="margin-bottom:6px">2 · What should they see?</div>
-    <div class="row" style="margin-bottom:10px">${sel("c-type", [["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"]], type0, 'style="max-width:420px"')}</div>
+    <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"]], type0, 'style="max-width:420px"')}</div>
 
     <div id="p-simple" style="display:none">
       <div class="row" style="margin-bottom:8px">${sel("c-pos", [["top", "Banner at top"], ["bottom", "Banner at bottom"]], v("position", "top"), 'style="width:160px"')}
@@ -271,6 +271,13 @@ function openCampaignModal(site, existing) {
         <iframe id="c-preview" sandbox="allow-scripts allow-forms allow-popups allow-modals" style="width:100%;height:360px;border:1px solid var(--border);border-radius:8px;background:#fff" title="Campaign preview"></iframe></div>
       <div class="callout warn" style="margin-top:10px;font-size:12.5px"><b>This code runs on your visitors' pages</b>, the same as a tag manager. Only paste code you trust. If your site sets a strict Content-Security-Policy, allow the form provider's domain (e.g. js.hsforms.net).</div>
     </div>
+    <div id="p-visual" style="display:none">
+      <div class="row"><input id="vz-url" type="text" class="grow" placeholder="https://yoursite.com/page" value="${esc(suggestPageUrl(site))}">
+        <button class="btn primary" type="button" id="vz-open">✎ Open page in editor</button></div>
+      <div class="muted" id="vz-msg" style="font-size:12.5px;margin:6px 0 10px">Your page opens with an editing toolbar. Click any text, image or button to change it (use <b>↑ Parent</b> to pick a whole banner), then press <b>Done</b>.
+        Visitors never see the editor, only the changed page — and only if they match “Who should see it?” above.</div>
+      <div class="lbl2">Changes <span class="muted" id="vz-count"></span></div><div id="vz-list"></div>
+    </div>
     <div class="lbl2" style="margin:16px 0 6px">3 · Preview it on your page</div>
     <div class="row"><input id="pv-url" type="text" class="grow" placeholder="https://yoursite.com/page" value="${esc(suggestPageUrl(site))}">
       <button class="btn primary" type="button" id="pv-here">Show here</button><button class="btn" type="button" id="pv-new">Open in new tab</button>
@@ -295,8 +302,9 @@ function openCampaignModal(site, existing) {
   };
   const syncType = () => {
     const t = $("#c-type", el).value;
-    $("#p-simple", el).style.display = t === "custom" ? "none" : "";
+    $("#p-simple", el).style.display = t === "custom" || t === "visual" ? "none" : "";
     $("#p-custom", el).style.display = t === "custom" ? "" : "none";
+    $("#p-visual", el).style.display = t === "visual" ? "" : "none";
     $("#c-pos", el).style.display = t === "banner" ? "" : "none";
     $("#c-title", el).closest(".field").style.display = t === "popup" ? "" : "none";
   };
@@ -341,9 +349,39 @@ function openCampaignModal(site, existing) {
     $("#c-preview", el).srcdoc = previewDoc($("#ed-html", el).value, $("#ed-css", el).value, $("#ed-js", el).value);
   };
 
+  // ---- "Change the page": the real-page editor feeds EDITOR.changes; saved as one `change` action per edit
+  EDITOR.changes = (existing && cfg.actions.every(a => a.type === "change"))
+    ? cfg.actions.map(a => ({ selector: a.selector, action: a.action, value: a.value || "", attr: a.attr || "" })) : [];
+  const describeChange = c => c.action === "attr" && c.attr === "src" ? "Replace image" : c.action === "attr" ? `Set ${c.attr}` : c.action === "css" && /background-image/.test(c.value) ? "Background image"
+    : { text: "Change text", html: "Change HTML", css: "Change style", hide: "Hide element" }[c.action] || c.action;
+  const renderVisual = () => {
+    const list = $("#vz-list", el); if (!list) return;
+    $("#vz-count", el).textContent = `(${EDITOR.changes.length})`;
+    list.innerHTML = EDITOR.changes.length ? `<div class="table-wrap"><table><tbody>${EDITOR.changes.map((c, i) => `<tr><td class="nowrap"><b>${esc(describeChange(c))}</b></td>
+      <td class="mono" style="word-break:break-all">${esc(c.selector)}</td><td style="word-break:break-all" class="muted">${esc((c.value || "").slice(0, 70))}</td>
+      <td class="right"><button class="btn sm" type="button" data-vzrm="${i}">✕</button></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="muted">No changes yet. Press “Open page in editor” and click something on your page.</div>`;
+    $$("[data-vzrm]", el).forEach(b => b.onclick = () => { EDITOR.changes.splice(+b.dataset.vzrm, 1); renderVisual(); });
+  };
+  EDITOR.onChange = renderVisual; renderVisual();
+  $("#vz-open", el).onclick = () => {
+    let u;
+    try { u = new URL($("#vz-url", el).value.trim()); if (!/^https?:$/.test(u.protocol)) throw 0; }
+    catch { $("#vz-msg", el).textContent = "Enter the full page address, starting with http:// or https://"; return; }
+    try { localStorage.setItem("ot_last_url_" + site.id, u.href); } catch { /* ignore */ }
+    u.hash = "ot_editor";
+    EDITOR.win = window.open(u.href, "ot_editor");
+    $("#vz-msg", el).textContent = EDITOR.win ? "Editor opened in a new tab. Make your changes there and press “Done”; they appear below. If no toolbar shows, the Optimize snippet isn't installed on that page."
+      : "Your browser blocked the popup — allow popups for this page and try again.";
+  };
+
   const buildBody = () => {
     const rules = [0, 1].map(i => ({ field: g("#c-f" + i), op: g("#c-o" + i), value: g("#c-v" + i) })).filter(r => r.field);
     const type = g("#c-type");
+    if (type === "visual") {
+      return { name: g("#c-name"), url_contains: g("#c-url"), match: g("#c-match"), frequency: g("#c-freq"), rules,
+        actions: EDITOR.changes.map(c => ({ type: "change", selector: c.selector, action: c.action, value: c.value, attr: c.attr || "" })) };
+    }
     const action = type === "custom" ? {
       type, html: $("#ed-html", el).value, css: $("#ed-css", el).value, js: $("#ed-js", el).value,
       display: g("#c-display"), trigger: g("#c-trigger"), trigger_value: Math.max(0, parseInt($("#c-tv", el).value, 10) || 0),
@@ -365,8 +403,9 @@ function openCampaignModal(site, existing) {
   const pvConfig = () => {
     const body = buildBody();
     if (existing) body.id = existing.id;
+    if (!body.actions.length) { $("#c-err", el).textContent = "Make at least one change in the editor first."; return null; }
     if (body.actions[0].type === "custom" && !body.actions[0].html.trim() && !body.actions[0].js.trim()) { $("#c-err", el).textContent = "Add some HTML or JavaScript to preview."; return null; }
-    if (body.actions[0].type !== "custom" && !(body.actions[0].text || body.actions[0].title)) { $("#c-err", el).textContent = "Add a message to preview."; return null; }
+    if (!["custom", "change"].includes(body.actions[0].type) && !(body.actions[0].text || body.actions[0].title)) { $("#c-err", el).textContent = "Add a message to preview."; return null; }
     $("#c-err", el).textContent = "";
     return body;
   };
@@ -397,11 +436,12 @@ function openCampaignModal(site, existing) {
     // the page reloads itself and re-requests the latest config, so edits to HTML/CSS/JS always show
     try { target.postMessage({ type: "ot:preview", campaign: cfg }, PV.origin); } catch { /* ignore */ }
   };
-  m.onClose = () => { if (PV.getConfig === pvConfig) { PV.getConfig = null; PV.frame = null; } };
+  m.onClose = () => { if (PV.getConfig === pvConfig) { PV.getConfig = null; PV.frame = null; } if (EDITOR.onChange === renderVisual) EDITOR.onChange = null; };
 
   $("#c-save", el).onclick = async () => {
     const body = buildBody();
     if (!body.name) { $("#c-err", el).textContent = "Give the campaign a name."; return; }
+    if (!body.actions.length) { $("#c-err", el).textContent = "Make at least one change in the editor first (Open page in editor)."; return; }
     try {
       if (existing) await api(`/api/campaigns/${existing.id}`, { method: "PUT", body });
       else await api(`/api/sites/${site.id}/campaigns`, { method: "POST", body });
@@ -423,7 +463,7 @@ window.addEventListener("message", e => {
 function suggestPageUrl(site) {
   let last = "";
   try { last = localStorage.getItem("ot_last_url_" + site.id) || ""; } catch { /* ignore */ }
-  if (site.domain === "localhost") return location.origin + "/site-demo?site=" + site.id;   // the bundled demo store
+  if (site.domain === "localhost" || site.domain === location.hostname) return location.origin + "/site-demo?site=" + site.id;   // the bundled demo store
   return last || (site.domain ? "https://" + site.domain + "/" : "");
 }
 
@@ -508,10 +548,11 @@ async function createDemoSite(btn) {
       <p style="margin-top:0">${d.created ? "Aurora Coffee (demo) is ready, with these already running:" : "You already have the demo site. It has:"}</p>
       <ul style="margin:0 0 14px;padding-left:20px"><li><b>3rd-visit signup form</b> — a popup form shown on a visitor's 3rd visit</li>
         <li><b>Welcome-back banner</b> — for returning visitors</li><li><b>Funnel</b> — visit → add to cart → join the club</li></ul>
-      <div class="callout"><b>Try the 3rd-visit form:</b> open the demo store, then press <b>Simulate next visit</b> twice in the little “Demo controls” box (bottom-left).
-        On visit #3 the form pops up after ~2 seconds.</div>
-      <div class="row" style="margin-top:14px"><a class="btn primary" href="${esc(url)}" target="_blank" rel="noopener">Open the demo store ↗</a>
-        <button class="btn" id="demo-go">Go to the dashboard for this site</button></div>`);
+      <div class="callout"><b>Visitors never see any counters or controls.</b> To <i>test</i> the 3rd-visit form yourself, open the store <b>with test controls</b>:
+        a small “Demo controls” box appears (only because of <code>&amp;controls=1</code> in the link). Press <b>Simulate next visit</b> twice; on visit #3 the form pops up after ~2 seconds.</div>
+      <div class="row" style="margin-top:14px"><a class="btn primary" href="${esc(url)}&controls=1" target="_blank" rel="noopener">Open demo store with test controls ↗</a>
+        <a class="btn" href="${esc(url)}" target="_blank" rel="noopener">Open as a normal visitor ↗</a>
+        <button class="btn" id="demo-go">Go to the dashboard</button></div>`);
     $("#demo-go", m.el).onclick = () => { m.close(); location.hash = `#/site/${d.id}/overview`; };
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; btn.textContent = label; }

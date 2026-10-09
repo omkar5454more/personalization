@@ -120,7 +120,7 @@
     if (!selected) { p.style.display = "none"; return; }
     var sel = selectorFor(selected), n = count(sel);
     var cs = getComputedStyle(selected);
-    var isLink = selected.tagName === "A";
+    var isLink = selected.tagName === "A", isImg = selected.tagName === "IMG";
     p.style.display = "block";
     p.innerHTML =
       '<div class="row"><b>&lt;' + selected.tagName.toLowerCase() + '&gt;</b>' +
@@ -136,12 +136,18 @@
       '<div style="width:80px"><label>Size (px)</label><input id="f-size" type="number" min="8" max="120"></div></div>' +
       '<div class="row" style="margin-top:6px"><button id="a-style" class="pri">Apply style</button><button id="a-hide">Hide element</button></div>' +
       (isLink ? '<hr><label>Link URL</label><input id="f-href" type="text"><div class="row" style="margin-top:6px"><button id="a-href" class="pri">Apply link</button></div>' : '') +
+      (isImg ? '<hr><label>Image URL (replaces this image)</label><input id="f-img" type="text" placeholder="https://…/photo.jpg">' +
+        '<label>Alt text</label><input id="f-alt" type="text"><div class="row" style="margin-top:6px"><button id="a-img" class="pri">Apply image</button></div>' : '') +
+      '<hr><label>Background image URL</label><input id="f-bgimg" type="text" placeholder="https://…/banner.jpg">' +
+      '<div class="muted">For a banner or section whose picture is a CSS background. Tip: use &uarr; Parent to select the whole banner.</div>' +
+      '<div class="row" style="margin-top:6px"><button id="a-bgimg">Apply background</button></div>' +
       '<details><summary>Edit HTML</summary><textarea id="f-html"></textarea><div class="row" style="margin-top:6px"><button id="a-html">Apply HTML</button></div></details>' +
       '<hr><b>Changes (<span id="cnt"></span>)</b><ul id="list"></ul>';
     $("#selTxt").textContent = sel;
     $("#f-text").value = selected.textContent.trim().slice(0, 2000);
     $("#f-html").value = selected.innerHTML.slice(0, 5000);
     if (isLink) $("#f-href").value = selected.getAttribute("href") || "";
+    if (isImg) { $("#f-img").value = selected.getAttribute("src") || ""; $("#f-alt").value = selected.getAttribute("alt") || ""; }
     var hex = function (rgb) {
       var m = rgb.match(/\d+/g); if (!m) return "#000000";
       return "#" + m.slice(0, 3).map(function (x) { return ("0" + (+x).toString(16)).slice(-2); }).join("");
@@ -178,6 +184,25 @@
       var v = $("#f-href").value.trim();
       if (v && !/^(https?:\/\/|\/|#|mailto:|tel:)/i.test(v)) { $("#hint").textContent = "Link must start with http(s)://, /, #, mailto: or tel:"; return; }
       addChange({ selector: sel, action: "attr", value: v, attr: "href" });
+      select(selected);
+    };
+    var okUrl = function (u) { return /^(https?:\/\/|\/|data:image\/)/i.test(u) && !/["')\s]/.test(u); };
+    if (isImg) $("#a-img").onclick = function () {
+      var v = $("#f-img").value.trim(), alt = $("#f-alt").value;
+      if (v && v !== (selected.getAttribute("src") || "")) {
+        if (!okUrl(v)) { $("#hint").textContent = "Image URL must start with http(s):// or / and contain no spaces or quotes"; return; }
+        addChange({ selector: sel, action: "attr", value: v, attr: "src" });
+        // srcset would otherwise override src in most browsers
+        if (selected.hasAttribute("srcset")) addChange({ selector: sel, action: "attr", value: "", attr: "srcset" });
+      }
+      if (alt !== (selected.getAttribute("alt") || "")) addChange({ selector: sel, action: "attr", value: alt, attr: "alt" });
+      select(selected);
+    };
+    $("#a-bgimg").onclick = function () {
+      var v = $("#f-bgimg").value.trim();
+      if (!v) return;
+      if (!okUrl(v)) { $("#hint").textContent = "Image URL must start with http(s):// or / and contain no spaces or quotes"; return; }
+      addChange({ selector: sel, action: "css", value: 'background-image:url("' + v + '") !important;background-size:cover !important;background-position:center !important;', attr: "" });
       select(selected);
     };
     renderList();

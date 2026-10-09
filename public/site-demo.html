@@ -47,6 +47,7 @@
   @media (max-width:800px){ .grid{grid-template-columns:1fr} .story{grid-template-columns:1fr} header.top{padding:14px 18px} main{padding:0 18px} .hero .inner{padding:0 18px} nav{gap:14px} }
 
   /* demo-only helper panel */
+  #demo-ctl[hidden] { display:none; }
   #demo-ctl { position:fixed; left:16px; bottom:16px; z-index:2147482000; background:#14181f; color:#e8ecf3; border-radius:12px; padding:12px 14px; width:260px;
               font:13px/1.45 system-ui,sans-serif; box-shadow:0 8px 30px rgba(0,0,0,.35); }
   #demo-ctl b { color:#fff; } #demo-ctl .row { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
@@ -98,10 +99,10 @@
     </section>
   </main>
 
-  <footer>© Aurora Coffee (demo site for Optimize) · This is a fake store for testing personalization, A/B tests, heatmaps and funnels.</footer>
+  <footer>© Aurora Coffee (demo site for Optimize) · Demo store.</footer>
 
   <!-- Demo-only controls so you do not have to wait 30 minutes between "visits". Ignored by tracking. -->
-  <div id="demo-ctl" data-ot-ignore="1">
+  <div id="demo-ctl" data-ot-ignore="1" hidden>
     <button class="x" id="dc-x" aria-label="Hide demo controls">×</button>
     <div><b>Demo controls</b></div>
     <div id="dc-state" class="muted">Loading Optimize…</div>
@@ -118,6 +119,8 @@
         try { localStorage.setItem(STORE, raw); } catch (e) {}
         document.cookie = "_ot=" + encodeURIComponent(raw) + ";max-age=31536000;path=/;SameSite=Lax";
       }
+      // Visitors never see the simulator. It only appears for testing: open this page with ?controls=1
+      if (q.get("controls") === "1") document.getElementById("demo-ctl").hidden = false;
       function show() {
         var el = document.getElementById("dc-state");
         if (!site) { el.textContent = "Add ?site=YOUR_SITE_ID to the URL to load the Optimize snippet."; return; }

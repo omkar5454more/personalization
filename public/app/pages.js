@@ -182,21 +182,28 @@ async function pageExperiments(view) {
 }
 
 // ---------------------------------------------------------------- Personalization
+function actionSummary(actions) {
+  const n = {};
+  actions.forEach(a => { n[a.type] = (n[a.type] || 0) + 1; });
+  const names = { change: k => `${k} page edit${k > 1 ? "s" : ""}`, banner: () => "banner", popup: () => "popup", custom: () => "custom code / form" };
+  return Object.entries(n).map(([t, k]) => (names[t] ? names[t](k) : t)).join(" + ");
+}
 async function pageCampaigns(view) {
   const s = curSite();
   const camps = await api(`/api/sites/${s.id}/campaigns`);
   view.innerHTML = siteHead("Personalization", "Show banners and popups only to the visitors you choose — for example returning visitors, a third visit, a traffic source or mobile users.",
-    `<button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
+    `<button class="btn" id="new-visual">✎ Edit page visually</button><button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
     <div class="card">${camps.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Who sees it</th><th>Shown</th><th class="right">Seen by</th><th class="right">Clicked</th><th class="right">Converted</th><th></th></tr></thead><tbody>
-      ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(c.config.actions.map(a => a.type).join(" + "))}</div></td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
+      ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(actionSummary(c.config.actions))}</div></td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
         <td class="muted">${c.config.rules.length ? c.config.rules.map(r => esc(`${r.field} ${r.op} ${r.value}`)).join(c.config.match === "any" ? " OR " : " AND ") : "Everyone"}</td>
         <td class="muted">${esc({ once: "Once per visitor", session: "Once per visit", always: "Every page load" }[c.config.frequency])}</td>
         <td class="right">${fmtNum(c.impressions)}</td><td class="right">${fmtNum(c.clicks)}</td><td class="right">${fmtNum(c.conversions)}</td>
         <td class="right nowrap"><button class="btn sm" data-edit-camp="${esc(c.id)}">Edit</button> ${statusButtons("campaigns", c.id, c.status)}</td></tr>`).join("")}</tbody></table></div>`
-      : `<div class="empty"><b>No campaigns yet</b>Try: “Returning visitor → welcome-back banner”, or “3rd visit → show a signup form” (HubSpot, Typeform, Google Forms or your own HTML/CSS/JS).<br><br><button class="btn primary" id="new-camp-2">＋ Create a campaign</button></div>`}</div>`;
+      : `<div class="empty"><b>No campaigns yet</b>Try: “Returning visitor → welcome-back banner”, or “3rd visit → show a signup form” (HubSpot, Typeform, Google Forms or your own HTML/CSS/JS).<br><br><button class="btn primary" id="new-visual-2">✎ Edit your page visually</button> <button class="btn" id="new-camp-2">＋ Banner / popup / form</button></div>`}</div>`;
   bindStatus(view);
   $$("[data-edit-camp]", view).forEach(b => b.onclick = () => openCampaignModal(s, camps.find(c => c.id === b.dataset.editCamp)));
   ["#new-camp", "#new-camp-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => openNewCampaign(s); });
+  ["#new-visual", "#new-visual-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => openNewCampaign(s, { visual: true }); });
 }
 
 // ---------------------------------------------------------------- Behavior
@@ -314,7 +321,7 @@ async function pageSettings(view) {
       <p class="muted" style="margin-top:0">Paste this as high in the &lt;head&gt; of every page. It uses this dashboard’s address (<code>${esc(location.origin)}</code>); once you deploy the tool, copy the snippet again from the live dashboard.
       With Google Tag Manager: add a <b>Custom HTML</b> tag containing it, fired on All Pages.</p>
       <div class="snippet"><button class="btn sm" id="copy">Copy</button><pre id="snip"></pre></div>
-      <p style="margin-bottom:0"><a href="/site-demo?site=${esc(s.id)}" target="_blank" rel="noopener">Open the Aurora Coffee demo site with this snippet →</a> <span class="muted">(a fake store to try campaigns, tests and heatmaps)</span></p></div>
+      <p style="margin-bottom:0"><a href="/site-demo?site=${esc(s.id)}&controls=1" target="_blank" rel="noopener">Open the Aurora Coffee demo store with test controls →</a> <span class="muted">(a fake store to try campaigns, tests and heatmaps; visitors never see the controls)</span></p></div>
     <div class="card card-pad" style="margin-bottom:16px"><h2>3 · Site details</h2><div class="grid g2">
       <div class="field"><label for="s-name">Name</label><input id="s-name" type="text" value="${esc(d.name)}"></div>
       <div class="field"><label for="s-domain">Domain</label><input id="s-domain" type="text" value="${esc(d.domain)}" placeholder="example.com"><span class="help">Used to label this site; paste a full URL if you like.</span></div></div>

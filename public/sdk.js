@@ -431,12 +431,12 @@
   }
   function onBody(fn) { if (document.body) fn(); else document.addEventListener("DOMContentLoaded", fn); }
   function runCampaigns(list) {
-    if (!list || !list.length) return;
+    if (!list || !list.length) return Promise.resolve();
     var needsGeo = list.some(function (c) { return (c.rules || []).some(function (r) { return r.field === "country"; }); });
     var geo = needsGeo
       ? fetch(ORIGIN + "/ctx").then(function (r) { return r.json(); }).then(function (j) { return j.country; }).catch(function () { return ""; })
       : Promise.resolve("");
-    geo.then(function (country) {
+    return geo.then(function (country) {
       var ctx = context(country);
       list.forEach(function (c) {
         if (campaignMatches(c, ctx) && frequencyAllows(c)) onBody(function () { runCampaign(c); });
@@ -617,11 +617,12 @@
     captureAttribution(); saveState(st);
     sendPageview(true);
     pendingEvents.splice(0).forEach(push);
-    runCampaigns(cfg.campaigns);
+    var applied = runCampaigns(cfg.campaigns);
     var redirecting = runExperiments(cfg.experiments);
     startTrackers();
     setTimeout(checkScroll, 400);
-    if (!redirecting) reveal();
+    // un-hide the page only once page-change campaigns were applied, so visitors never see a flash of the original
+    if (!redirecting) applied.then(reveal, reveal);
   }
 
   // ---- preview mode: render the campaign the dashboard sends, ignoring rules/frequency/triggers.
