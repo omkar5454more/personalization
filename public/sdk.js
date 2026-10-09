@@ -610,6 +610,8 @@
   };
 
   function consentGranted() { try { return localStorage.getItem(CONSENT) === "1"; } catch (e) { return false; } }
+  // An explicit "No" (OT.consent(false)) is remembered and honoured on every later page, even if the site doesn't require consent.
+  function consentDenied() { try { return localStorage.getItem(CONSENT) === "0"; } catch (e) { return false; } }
 
   function start(cfg) {
     started = true; persist = true; active = true;
@@ -664,6 +666,7 @@
     .then(function (cfg) {
       cfgCache = cfg;
       settings = cfg.settings || {};
+      if (consentDenied()) { reveal(); return; }                                // the visitor declined: never start
       if (settings.consent_required && !consentGranted()) { reveal(); return; } // wait for OT.consent(true)
       start(cfg);
     })
