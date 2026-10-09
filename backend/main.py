@@ -31,6 +31,30 @@ app = FastAPI(title="Optimize")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
+class VercelPathFix:
+    """On Vercel, vercel.json rewrites send every API call to the single function at /api/index and put the
+    path the visitor actually requested in `?__p=`. Restore it so FastAPI routes normally. Only active on Vercel,
+    and only when the marker is present."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and os.getenv("VERCEL"):
+            from urllib.parse import parse_qsl, urlencode
+            pairs = parse_qsl(scope.get("query_string", b"").decode(), keep_blank_values=True)
+            real = next((v for k, v in pairs if k == "__p"), None)
+            if real and real.startswith("/") and not real.startswith("//"):
+                scope = dict(scope)
+                scope["path"] = real
+                scope["raw_path"] = real.encode()
+                scope["query_string"] = urlencode([(k, v) for k, v in pairs if k != "__p"]).encode()
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(VercelPathFix)   # added last => outermost, runs before routing and CORS
+
+
 @app.exception_handler(DatabaseError)
 async def database_error(request: Request, exc: DatabaseError):
     return JSONResponse({"detail": f"Database problem: {exc}"}, status_code=503)

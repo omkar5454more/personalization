@@ -1,23 +1,49 @@
 {
   "cleanUrls": true,
   "rewrites": [
-    { "source": "/demo/:path*", "destination": "/demo.html" },
-    { "source": "/site-demo/:path*", "destination": "/site-demo.html" },
-    { "source": "/api/:path*", "destination": "/api/index" },
-    { "source": "/collect", "destination": "/api/index" },
-    { "source": "/ctx", "destination": "/api/index" },
-    { "source": "/sdk/:file", "destination": "/api/index" }
+    {
+      "source": "/demo/:rest*",
+      "destination": "/demo.html"
+    },
+    {
+      "source": "/site-demo/:rest*",
+      "destination": "/site-demo.html"
+    },
+    {
+      "source": "/api/:rest*",
+      "destination": "/api/index?__p=/api/:rest*"
+    },
+    {
+      "source": "/collect",
+      "destination": "/api/index?__p=/collect"
+    },
+    {
+      "source": "/ctx",
+      "destination": "/api/index?__p=/ctx"
+    },
+    {
+      "source": "/sdk/:file",
+      "destination": "/api/index?__p=/sdk/:file"
+    }
   ],
   "headers": [
     {
       "source": "/(sdk|editor|heatmap).js",
       "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=300, s-maxage=3600" },
-        { "key": "Access-Control-Allow-Origin", "value": "*" }
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=300, s-maxage=3600"
+        },
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        }
       ]
     }
   ],
   "functions": {
-    "api/index.py": { "maxDuration": 30 }
+    "api/index.py": {
+      "maxDuration": 30
+    }
   }
 }
