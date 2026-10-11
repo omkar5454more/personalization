@@ -22,6 +22,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from backend.database import ROOT, DatabaseError, db
+from backend.rules import Rule, RULE_FIELDS, RULE_OPS, clean_rules, validate_rules  # noqa: F401
+from backend.stats import evaluate, z_test_p
+from backend.audiences import build_router as build_audiences_router, goal_as_test_goal, goal_row
 
 PUBLIC = ROOT / "public"      # static site: dashboard, SDK scripts, demo (served by Vercel's CDN in production)
 
@@ -109,10 +112,11 @@ class Variant(BaseModel):
 
 
 class Goal(BaseModel):
-    type: str  # click | pageview | event
+    type: str  # click | pageview | event | form
     selector: str = ""
     url_contains: str = ""
-    name: str = ""
+    name: str = ""          # event goals: the OT.track() name
+    form_name: str = ""     # form goals: the form's id / name / action
 
 
 class ExperimentIn(BaseModel):
@@ -120,7 +124,19 @@ class ExperimentIn(BaseModel):
     url_contains: str = ""
     traffic: int = Field(default=100, ge=1, le=100)
     variants: list[Variant]
-    goal: Goal
+    goal: Optional[Goal] = None          # filled from `goal_id` when a saved goal is chosen
+    goal_id: str = ""
+    secondary_goal_ids: list[str] = []   # extra saved goals reported alongside the main one
+    # audience: only visitors who match are entered into the test (a saved segment, or rules written inline)
+    segment_id: str = ""
+    match: str = "all"
+    rules: list[Rule] = []
+    # decision helpers
+    auto_winner: bool = False            # complete the test by itself once the evidence rule in stats.evaluate is met
+    ship_winner: bool = False            # after completion keep serving the winning version to everyone
+    min_days: int = Field(default=7, ge=0, le=90)
+    min_visitors: int = Field(default=100, ge=0, le=1_000_000)   # per variant, before a winner can be declared
+    winner: str = ""                     # set by the server when the test is completed
 
 
 class StatusIn(BaseModel):
@@ -142,6 +158,9 @@ def get_site(con, site_id: str):
 def validate_experiment(e: ExperimentIn):
     if len(e.variants) < 2:
         raise HTTPException(422, "need at least a control and one variant")
+    if len(e.variants) > 6:
+        raise HTTPException(422, "up to 6 versions per test")
+    validate_rules(e.rules, e.match)
     keys = [v.key for v in e.variants]
     if len(set(keys)) != len(keys):
         raise HTTPException(422, "variant keys must be unique")
@@ -151,8 +170,30 @@ def validate_experiment(e: ExperimentIn):
         for c in v.changes:
             if c.action not in {"text", "html", "css", "attr", "hide"}:
                 raise HTTPException(422, f"unknown action {c.action}")
-    if e.goal.type not in {"click", "pageview", "event"}:
-        raise HTTPException(422, "goal type must be click, pageview or event")
+    if e.goal is None:
+        raise HTTPException(422, "choose what counts as a win (a saved goal or a custom one)")
+    if e.goal.type not in {"click", "pageview", "event", "form"}:
+        raise HTTPException(422, "goal type must be click, pageview, event or form")
+    if len(set(e.secondary_goal_ids)) != len(e.secondary_goal_ids) or len(e.secondary_goal_ids) > 5:
+        raise HTTPException(422, "up to 5 different secondary goals")
+    if e.ship_winner and not e.variants:
+        raise HTTPException(422, "nothing to ship")
+
+
+def resolve_refs(con, site_id: str, body) -> None:
+    """Checks that the segment / saved goals a test or campaign points at belong to this site, and copies the saved
+    goal's definition into the test, so later edits to the goal never change a test that is already collecting data."""
+    if body.segment_id:
+        if not con.execute("SELECT 1 FROM segments WHERE id=? AND site_id=?", (body.segment_id, site_id)).fetchone():
+            raise HTTPException(422, "that audience segment no longer exists")
+    if body.goal_id:
+        g = con.execute("SELECT * FROM goals WHERE id=? AND site_id=? AND archived=0", (body.goal_id, site_id)).fetchone()
+        if not g:
+            raise HTTPException(422, "that goal no longer exists")
+        body.goal = Goal(**goal_as_test_goal(goal_row(g)))
+    for gid in getattr(body, "secondary_goal_ids", []):
+        if not con.execute("SELECT 1 FROM goals WHERE id=? AND site_id=?", (gid, site_id)).fetchone():
+            raise HTTPException(422, "a secondary goal no longer exists")
 
 
 # ---------------------------------------------------------------- auth
@@ -445,6 +486,13 @@ def create_demo_site(request: Request, user=Depends(current_user)):
         ]
         for c in (third, banner):
             stmts.append(("INSERT INTO campaigns VALUES (?,?,?,?,?,?)", (new_id("cmp"), sid, c.name, "running", c.model_dump_json(), now)))
+        # ready-made goals and an audience, so Goals / Audiences are not empty on the demo
+        for gname, ev_name in (("Added to cart", "add_to_cart"), ("Joined the club", "club_signup")):
+            stmts.append(("INSERT INTO goals (id,site_id,name,type,selector,url_contains,event_name,form_name,value,count_mode,archived,created) "
+                          "VALUES (?,?,?,?,?,?,?,?,?,?,0,?)", (new_id("goal"), sid, gname, "event", "", "", ev_name, "", 0, "once", now)))
+        stmts.append(("INSERT INTO segments VALUES (?,?,?,?,?,?,?)",
+                      (new_id("seg"), sid, "Returning visitors on mobile", "People who have been here before, on a phone.", "all",
+                       json.dumps([{"field": "returning", "op": "eq", "value": "true"}, {"field": "device", "op": "eq", "value": "mobile"}]), now)))
         con.batch(stmts)
     return {"id": sid, "created": True, "demo_url": f"/site-demo?site={sid}"}
 
@@ -485,15 +533,36 @@ def list_experiments(site_id: str, user=Depends(current_user)):
 
 @app.post("/api/sites/{site_id}/experiments")
 def create_experiment(site_id: str, body: ExperimentIn, user=Depends(current_user)):
-    validate_experiment(body)
     eid = new_id("exp")
     with db() as con:
         owned_site(con, site_id, user)
+        resolve_refs(con, site_id, body)
+        validate_experiment(body)
+        body.winner = ""
         con.execute(
             "INSERT INTO experiments VALUES (?,?,?,?,?,?)",
             (eid, site_id, body.name, "draft", body.model_dump_json(), time.time()),
         )
     return {"id": eid, "status": "draft"}
+
+
+class WinnerIn(BaseModel):
+    variant: str
+
+
+@app.post("/api/experiments/{exp_id}/winner")
+def declare_winner(exp_id: str, body: WinnerIn, user=Depends(current_user)):
+    """Manually end a test and name the winning version (the control = keep the original)."""
+    with db() as con:
+        row = owned_experiment(con, exp_id, user)
+        cfg = json.loads(row["config"])
+        if body.variant not in [v["key"] for v in cfg["variants"]]:
+            raise HTTPException(422, "unknown version")
+        cfg["winner"] = body.variant
+        cfg["completed_reason"] = "manual"
+        cfg["completed_at"] = time.time()
+        con.execute("UPDATE experiments SET status='completed', config=? WHERE id=?", (json.dumps(cfg), exp_id))
+    return {"id": exp_id, "status": "completed", "winner": body.variant}
 
 
 @app.patch("/api/experiments/{exp_id}/status")
@@ -506,16 +575,8 @@ def set_status(exp_id: str, body: StatusIn, user=Depends(current_user)):
     return {"id": exp_id, "status": body.status}
 
 
-def _z_test(n_a: int, c_a: int, n_b: int, c_b: int) -> Optional[float]:
-    """Two-sided p-value for a difference in conversion rates (pooled z-test)."""
-    if n_a < 1 or n_b < 1:
-        return None
-    p_pool = (c_a + c_b) / (n_a + n_b)
-    se = math.sqrt(p_pool * (1 - p_pool) * (1 / n_a + 1 / n_b))
-    if se == 0:
-        return None
-    z = (c_b / n_b - c_a / n_a) / se
-    return 2 * (1 - 0.5 * (1 + math.erf(abs(z) / math.sqrt(2))))
+def _z_test(n_a: int, c_a: int, n_b: int, c_b: int) -> Optional[float]:   # kept for callers/tests of the old name
+    return z_test_p(n_a, c_a, n_b, c_b)
 
 
 @app.get("/api/experiments/{exp_id}/results")
@@ -543,25 +604,44 @@ def results(exp_id: str, user=Depends(current_user)):
                 (exp_id,),
             )
         }
+        first = con.execute("SELECT MIN(ts) t FROM events WHERE exp_id=? AND type='exposure'", (exp_id,)).fetchone()["t"]
+        # Secondary goals: site-wide `conversion` events from visitors AFTER they entered the test.
+        secondary = []
+        for gid in cfg.get("secondary_goal_ids", []):
+            g = con.execute("SELECT name FROM goals WHERE id=?", (gid,)).fetchone()
+            conv = {r["variant"]: r["n"] for r in con.execute(
+                "SELECT x.variant variant, COUNT(DISTINCT x.visitor_id) n FROM "
+                "(SELECT visitor_id, variant, MIN(ts) t FROM events WHERE exp_id=? AND type='exposure' GROUP BY visitor_id, variant) x "
+                "JOIN events c ON c.site_id=? AND c.type='conversion' AND c.name=? AND c.visitor_id=x.visitor_id AND c.ts>=x.t "
+                "GROUP BY x.variant", (exp_id, row["site_id"], gid))}
+            secondary.append({"goal_id": gid, "name": g["name"] if g else gid, "converters": conv})
     keys = [v["key"] for v in cfg["variants"]]
     control = keys[0]
-    n_c, c_c = exposed.get(control, 0), converted.get(control, 0)
-    out = []
-    for k in keys:
-        n, c = exposed.get(k, 0), converted.get(k, 0)
-        rate = c / n if n else 0.0
-        item = {"variant": k, "visitors": n, "conversions": c, "rate": rate,
-                "is_control": k == control, "uplift": None, "p_value": None, "significant": False}
-        if k != control and n_c and n:
-            base = c_c / n_c
-            item["uplift"] = ((rate - base) / base) if base else None
-            p = _z_test(n_c, c_c, n, c)
-            item["p_value"] = p
-            item["significant"] = p is not None and p < 0.05
-        out.append(item)
-    return {"id": exp_id, "name": row["name"], "status": row["status"], "variants": out,
-            "note": "Significance is a naive fixed-horizon z-test; don't stop at the first "
-                    "significant reading — pre-plan the sample size."}
+    weights = {v["key"]: max(v.get("weight", 0), 0) for v in cfg["variants"]}
+    runtime_days = ((time.time() - first) / 86400) if first else 0.0
+    ev = evaluate([{"variant": k, "visitors": exposed.get(k, 0), "conversions": converted.get(k, 0)} for k in keys],
+                  weights, control, min_visitors=cfg.get("min_visitors", 0), runtime_days=runtime_days,
+                  min_days=cfg.get("min_days", 0), auto=cfg.get("auto_winner", False))
+    status = row["status"]
+    if status == "running" and ev["auto_ready"]:
+        # The evidence rule is met: end the test and remember the winner (applied lazily, when someone looks at results).
+        cfg["winner"] = ev["winner"]; cfg["completed_reason"] = "auto"; cfg["completed_at"] = time.time()
+        with db() as con:
+            con.execute("UPDATE experiments SET status='completed', config=? WHERE id=?", (json.dumps(cfg), exp_id))
+        status = "completed"
+    sec = []
+    for sg in secondary:
+        sec.append({"goal_id": sg["goal_id"], "name": sg["name"], "variants": [
+            {"variant": k, "visitors": exposed.get(k, 0), "converters": sg["converters"].get(k, 0),
+             "rate": (sg["converters"].get(k, 0) / exposed[k]) if exposed.get(k) else 0.0} for k in keys]})
+    return {"id": exp_id, "name": row["name"], "status": status, "variants": ev["variants"], "srm": ev["srm"],
+            "alpha": ev["alpha"], "needed_per_variant": ev["needed_per_variant"], "baseline_rate": ev["baseline_rate"],
+            "enough_data": ev["enough_data"], "winner": cfg.get("winner") or ev["winner"],
+            "winner_declared": bool(cfg.get("winner")), "completed_reason": cfg.get("completed_reason"),
+            "recommendation": ev["recommendation"], "runtime_days": runtime_days, "secondary": sec,
+            "note": "Significance uses a fixed-horizon z-test with a Bonferroni correction when there are several versions; "
+                    "the probability-to-beat-control is Bayesian. Decide your sample size first and avoid stopping at the "
+                    "first lucky reading."}
 
 
 @app.get("/api/sites/{site_id}/visitors")
@@ -582,15 +662,7 @@ def visitor_stats(site_id: str, days: int = 14, user=Depends(current_user)):
 
 
 # ---------------------------------------------------------------- personalization
-RULE_FIELDS = {"returning", "visit_no", "days_since_last", "days_since_first", "utm_source",
-               "utm_medium", "utm_campaign", "device", "country", "hour", "weekday", "url", "referrer"}
-RULE_OPS = {"eq", "neq", "gte", "lte", "contains"}
-
-
-class Rule(BaseModel):
-    field: str
-    op: str = "eq"
-    value: str = ""
+# (targeting rules live in backend/rules.py: Rule, RULE_FIELDS, RULE_OPS, validate_rules)
 
 
 class Action(BaseModel):
@@ -622,6 +694,9 @@ class CampaignIn(BaseModel):
     match: str = "all"          # all | any
     frequency: str = "once"     # once | session | always
     rules: list[Rule] = []
+    segment_id: str = ""        # a saved audience; when set, the segment's rules replace `rules` in the SDK config
+    goal_id: str = ""           # optional saved goal: conversions after seeing this campaign are counted for it
+    goal: Optional[Goal] = None
     actions: list[Action]
 
 
@@ -630,11 +705,9 @@ def validate_campaign(c: CampaignIn):
         raise HTTPException(422, "add at least one action")
     if len(c.actions) > 100:
         raise HTTPException(422, "too many actions (max 100)")
-    if c.match not in {"all", "any"} or c.frequency not in {"once", "session", "always"}:
-        raise HTTPException(422, "bad match/frequency")
-    for r in c.rules:
-        if r.field not in RULE_FIELDS or r.op not in RULE_OPS:
-            raise HTTPException(422, f"bad rule {r.field} {r.op}")
+    if c.frequency not in {"once", "session", "always"}:
+        raise HTTPException(422, "bad frequency")
+    validate_rules(c.rules, c.match)
     for a in c.actions:
         if a.type not in {"banner", "popup", "change", "custom"}:
             raise HTTPException(422, f"unknown action type {a.type}")
@@ -684,6 +757,7 @@ def create_campaign(site_id: str, body: CampaignIn, user=Depends(current_user)):
     cid = new_id("cmp")
     with db() as con:
         owned_site(con, site_id, user)
+        resolve_refs(con, site_id, body)
         con.execute("INSERT INTO campaigns VALUES (?,?,?,?,?,?)",
                     (cid, site_id, body.name, "draft", body.model_dump_json(), time.time()))
     return {"id": cid, "status": "draft"}
@@ -693,7 +767,8 @@ def create_campaign(site_id: str, body: CampaignIn, user=Depends(current_user)):
 def update_campaign(cid: str, body: CampaignIn, user=Depends(current_user)):
     validate_campaign(body)
     with db() as con:
-        owned_campaign(con, cid, user)
+        row = owned_campaign(con, cid, user)
+        resolve_refs(con, row["site_id"], body)
         con.execute("UPDATE campaigns SET name=?, config=? WHERE id=?", (body.name, body.model_dump_json(), cid))
     return {"id": cid}
 
@@ -723,34 +798,52 @@ def visitor_context(request: Request):
 @app.get("/sdk/{site_id}.json")
 def sdk_config(site_id: str):
     with db() as con:
-        site_c, exp_c, camp_c = con.multi([
+        site_c, exp_c, camp_c, seg_c, goal_c = con.multi([
             ("SELECT * FROM sites WHERE id=?", (site_id,)),
-            ("SELECT id, config FROM experiments WHERE site_id=? AND status='running'", (site_id,)),
+            ("SELECT id, status, config FROM experiments WHERE site_id=? AND status IN ('running','completed')", (site_id,)),
             ("SELECT id, config FROM campaigns WHERE site_id=? AND status='running'", (site_id,)),
+            ("SELECT id, match, rules FROM segments WHERE site_id=?", (site_id,)),
+            ("SELECT * FROM goals WHERE site_id=? AND archived=0", (site_id,)),
         ])
         site_row = site_c.fetchone()
         if not site_row:
             raise HTTPException(404, "site not found")
-        rows, crows = exp_c.fetchall(), camp_c.fetchall()
+        rows, crows, srows, grows = exp_c.fetchall(), camp_c.fetchall(), seg_c.fetchall(), goal_c.fetchall()
+    segs = {x["id"]: {"match": x["match"] or "all", "rules": json.loads(x["rules"] or "[]")} for x in srows}
+
+    def with_audience(cfg):
+        seg = segs.get(cfg.get("segment_id") or "")
+        if seg:                                  # a deleted segment falls back to the rules saved with the item
+            cfg["rules"], cfg["match"] = seg["rules"], seg["match"]
+        return cfg
+
     exps = []
     for r in rows:
         cfg = json.loads(r["config"])
         cfg["id"] = r["id"]
-        exps.append(cfg)
+        if r["status"] == "completed":
+            # a finished test keeps serving its winning version to everyone, but only if the owner asked for that
+            win = cfg.get("winner")
+            v = next((x for x in cfg["variants"] if x["key"] == win), None)
+            if not (cfg.get("ship_winner") and v and (v.get("changes") or v.get("redirect_url"))):
+                continue
+            cfg["rollout"] = win
+        exps.append(with_audience(cfg))
     camps = []
     for r in crows:
         cfg = json.loads(r["config"])
         cfg["id"] = r["id"]
-        camps.append(cfg)
+        camps.append(with_audience(cfg))
+    goals = [{k: g[k] for k in ("id", "type", "selector", "url_contains", "event_name", "form_name", "value", "count_mode")} for g in grows]
     # Cached 60s at the CDN (s-maxage) so a busy site doesn't hit the function/database on every pageview.
-    return JSONResponse({"site": site_id, "settings": site_settings(site_row), "experiments": exps, "campaigns": camps},
+    return JSONResponse({"site": site_id, "settings": site_settings(site_row), "experiments": exps, "campaigns": camps, "goals": goals},
                         headers={"Cache-Control": "public, max-age=60, s-maxage=60, stale-while-revalidate=300"})
 
 
 MAX_BATCH = 50
 
 
-EVENT_TYPES = {"pageview", "event", "exposure", "goal", "impression", "click",
+EVENT_TYPES = {"pageview", "event", "exposure", "goal", "conversion", "impression", "click",
                "autoclick", "scroll", "engage", "form", "rage"}
 
 
@@ -844,6 +937,7 @@ def demo(rest: str = ""):
 from backend.analytics import build_router  # noqa: E402  (needs db/current_user/owned_site defined above)
 
 app.include_router(build_router(db, current_user, owned_site))
+app.include_router(build_audiences_router(db, current_user, owned_site, new_id))
 # must be last: a catch-all mount, so every API route above wins.
 # On Vercel public/ is served by the CDN and is NOT bundled into this function, so only mount it when present.
 if PUBLIC.is_dir():

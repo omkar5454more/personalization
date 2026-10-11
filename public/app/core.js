@@ -92,6 +92,7 @@ function renderLogin() {
 // ---- shell + sidebar
 const TABS = [
   ["overview", "◧", "Overview"], ["experiments", "⚗", "A/B tests"], ["campaigns", "✦", "Personalization"],
+  ["audiences", "◔", "Audiences"], ["goals", "◎", "Goals"],
   ["behavior", "⌖", "Behavior"], ["heatmaps", "◍", "Heatmaps"], ["funnels", "⏷", "Funnels"], ["visitors", "☺", "Visitors"], ["live", "●", "Live feed"], ["settings", "⚙", "Install & settings"],
 ];
 const STATUS_LABEL = { live: "Live now", receiving: "Receiving data", idle: "No recent data", waiting: "Waiting for data" };
@@ -149,7 +150,7 @@ async function route() {
   renderSidebar();
   const view = $("#view");
   view.innerHTML = `<div class="muted">Loading…</div>`;
-  const pages = { sites: pageSites, overview: pageOverview, experiments: pageExperiments, campaigns: pageCampaigns,
+  const pages = { sites: pageSites, overview: pageOverview, experiments: pageExperiments, campaigns: pageCampaigns, audiences: pageAudiences, goals: pageGoals,
     behavior: pageBehavior, heatmaps: pageHeatmaps, funnels: pageFunnels, visitors: pageVisitors, live: pageLive, settings: pageSettings };
   try { await (pages[r.tab] || pageSites)(view); }
   catch (e) { if (e.message !== "Please log in") view.innerHTML = `<div class="callout warn">Could not load this page: ${esc(e.message)}</div>`; }

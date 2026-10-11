@@ -50,7 +50,11 @@ Notes
 ## Dashboard map (left sidebar)
 - All sites        every connected site: connection status, 7-day traffic, running tests/campaigns
 - Overview         visitors, sessions, pageviews, avg time, scroll depth, new vs returning, sources, devices
-- A/B tests        create (visual editor), start/pause, results with significance
+- A/B tests        create with the visual editor: two or more versions (A/B/C...), traffic split per version, optional audience,
+                   a saved goal (plus extra goals measured alongside), split-URL redirects. Results show 95% ranges, uplift,
+                   Bayesian "beats original" %, Bonferroni-corrected p-values, a sample-ratio-mismatch warning, how many visitors are
+                   still needed, and a plain-language recommendation. Optional: finish automatically when there is a clear winner
+                   (enough visitors and days, strong evidence, healthy split) and keep serving the winner to everyone.
 - Personalization  campaigns by rule (returning, visit no., UTM, device, country, hour...). Content can be a banner,
                    a popup, or **Custom code**: an HTML / CSS / JS editor with templates (HubSpot, Typeform,
                    Google Forms, Mailchimp/pasted form, plain form), sandboxed preview, display as popup /
@@ -61,6 +65,12 @@ Notes
                    audience you choose (e.g. returning visitors). Visitors never see the editor or any visit counters.
                    **Image upload:** in the editor, ⬆ Upload sends a file (PNG/JPG/WebP/GIF, resized to max 1600 px, <= 2 MB) to the
                    dashboard, which stores it in the database and returns a public `/img/<id>` link that is applied for you.
+- Audiences        save "who" once -- a set of targeting rules (returning, device, OS, browser, language, country, UTM, referrer site,
+                   search keyword, landing page, pages viewed this visit, "has done event X", plus your own data via
+                   `OT.identify({plan:"pro"})`) -- and reuse it in campaigns and A/B tests. Edit it once, everything follows.
+- Goals            one definition of a conversion (click / page / custom event / form, optional value, once or every time). Every
+                   goal is tracked site-wide; the page shows conversions, people, rate, value, a trend and what converting visitors
+                   had been shown (campaigns and test versions, "shown vs not shown" lift -- a hint, not proof).
 - Behavior         pages, clicks (+rage clicks), scroll depth, forms (start vs submit)
 - Heatmaps         click heatmap + scroll map per page and device; schematic in the dashboard, or painted over
                    your real page via "Open page with heatmap" (SDK opens in overlay mode, no tracking)
@@ -69,6 +79,18 @@ Notes
 - Visitors         per-visitor journey timeline
 - Live feed        events as they arrive (5s refresh)
 - Install & settings   snippet, connection check, tracking toggles, consent mode, origin restriction
+
+## Targeting facts and visitor data
+Rules run in the visitor's browser (`public/sdk.js` `context()`), so no personal data leaves it. Built-in facts: returning, visit number,
+days since first/last visit, customer, device, OS, browser, language, country (needs the host's geo header), UTM source/medium/campaign/
+term/content, referrer site and URL, search keyword (`utm_term` or `?q=`), landing page of the visit, current URL, pages viewed this visit,
+hour, weekday and "has done event X". Add your own with `OT.identify({...})` (up to 20 keys; string/number/boolean) and target them as
+`attr.<name>`. Code can call it before the SDK has loaded: `window.OT = window.OT || {q: []}; OT.q.push(["identify", {plan: "pro"}])`.
+`OT.track("purchase")` also marks the visitor as a customer for the "customer" and "has done event" rules.
+
+## Tests
+    python -m pytest tests          # stats + API (uses a throw-away database)
+    tests/e2e                       # the real SDK and dashboard scripts in jsdom -- see tests/e2e/README.md
 
 ## Custom-code campaigns (forms)
 - HTML: markup plus `<script>` tags (external scripts load in order, then run). CSS: use `{{container}}` for the box.
@@ -98,7 +120,7 @@ nothing is stored/sent until `OT.consent(true)`; `OT.consent(false)` deletes the
   reset, email verification, teams/roles.
 - `/collect` is public by design (it receives browser events). Protections: 200 KB body cap, optional Origin check
   (best-effort: a non-browser client can forge the header). No bot filtering or per-site rate limit yet.
-- Stats are a fixed-horizon z-test (no peeking correction / SRM check).
+- Stats are a fixed-horizon z-test with a Bonferroni correction for several versions, a Bayesian probability and an SRM check; auto-finish is evaluated when the A/B tests page (or results) is loaded, not by a background job. Decide your sample size first.
 - Experiments are evaluated on full page loads; SPA route changes re-run campaigns and tracking only.
 - Visual editor / heatmap overlay / page preview: need the snippet on the target page; fail on sites with COOP same-origin
   or a CSP blocking the script; no iframe/shadow-DOM editing.

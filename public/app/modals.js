@@ -74,71 +74,179 @@ async function handleEditorUpload(e, m) {
 }
 
 // ---------------------------------------------------------------- new A/B test
-function openNewExperiment(site) {
-  EDITOR.changes = []; EDITOR.siteId = site.id;
+// Visitors needed in EACH version to detect a relative lift (same formula as backend/stats.min_sample_per_variant).
+function sampleSize(baseline, relLift) {
+  if (!(baseline > 0 && baseline < 1 && relLift > 0)) return null;
+  const p1 = baseline, p2 = Math.min(0.999, baseline * (1 + relLift)), pbar = (p1 + p2) / 2;
+  const n = Math.pow(1.96 * Math.sqrt(2 * pbar * (1 - pbar)) + 0.8416 * Math.sqrt(p1 * (1 - p1) + p2 * (1 - p2)), 2) / Math.pow(p2 - p1, 2);
+  return Math.ceil(n);
+}
+const VERSION_LETTERS = "BCDEF";
+
+async function openNewExperiment(site) {
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
+  const saved = goals.filter(g => !g.archived);
+  EDITOR.siteId = site.id;
   let lastUrl = "";
   try { lastUrl = localStorage.getItem("ot_last_url_" + site.id) || ""; } catch { /* ignore */ }
   if (!lastUrl && site.domain) lastUrl = "https://" + site.domain + "/";
+  const V = { list: [{ key: "control", weight: 50, changes: [], redirect_url: "" }, { key: "variant_b", weight: 50, changes: [], redirect_url: "" }], sel: 1 };
+  EDITOR.changes = V.list[1].changes;
+
   const m = openModal("New A/B test", `
     <div class="field"><label for="x-name">Test name</label><input id="x-name" type="text" placeholder="Homepage headline test"></div>
     <div class="grid g2">
       <div class="field"><label for="x-url">Run only on URLs containing</label><input id="x-url" type="text" placeholder="/pricing  (blank = every page)"></div>
       <div class="field"><label for="x-traffic">Traffic included (%)</label><input id="x-traffic" type="number" value="100" min="1" max="100"></div></div>
+
     <hr style="border:0;border-top:1px solid var(--border);margin:6px 0 14px">
-    <div class="lbl2" style="margin-bottom:6px">Step 1 · Build the variant (version B)</div>
-    <div class="row"><input id="x-page" type="text" class="grow" placeholder="https://yoursite.com/page-to-edit" value="${esc(lastUrl)}">
-      <button class="btn primary" id="x-open">Open visual editor</button></div>
-    <div class="muted" id="x-msg" style="margin:6px 0 10px;font-size:12.5px">Your page opens in a new tab. Click any element, change text, colour, size or link, or hide it, then press “Done”. The snippet must already be on that page.</div>
-    <div class="lbl2">Changes in version B <span class="muted" id="x-count"></span></div><div id="x-list" style="margin-bottom:10px"></div>
-    <details><summary class="muted" style="cursor:pointer">Add a change by CSS selector instead</summary>
-      <div class="row" style="margin-top:8px"><input id="x-sel" type="text" class="grow" placeholder="CSS selector e.g. h1">
-        <select id="x-act" style="width:110px"><option>text</option><option>html</option><option>css</option><option>hide</option></select>
-        <input id="x-val" type="text" class="grow" placeholder="New value"><button class="btn sm" id="x-add">Add</button></div></details>
+    <div class="lbl2" style="margin-bottom:6px">Step 1 · Who is in the test?</div>
+    <div id="x-audience"></div>
+
     <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
-    <div class="lbl2" style="margin-bottom:6px">Step 2 · What counts as a win?</div>
-    <div class="row"><select id="x-gt" style="width:210px"><option value="click">Click on an element</option><option value="pageview">Visit a page</option><option value="event">Custom event</option></select>
+    <div class="lbl2" style="margin-bottom:6px">Step 2 · Versions and traffic split</div>
+    <div class="tabs" id="x-tabs" role="tablist" style="margin-bottom:8px"></div>
+    <div id="x-split" class="muted" style="font-size:12.5px;margin-bottom:10px"></div>
+    <div id="x-version"></div>
+
+    <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+    <div class="lbl2" style="margin-bottom:6px">Step 3 · What counts as a win?</div>
+    <div class="row"><select id="x-goal" style="max-width:360px">
+        ${saved.map(g => `<option value="${esc(g.id)}">${esc(g.name)} — ${esc(GOAL_TYPE_LABEL[g.type])}</option>`).join("")}
+        <option value="__custom" ${saved.length ? "" : "selected"}>Custom goal (this test only)…</option></select>
+      <a href="#/site/${esc(site.id)}/goals" target="_blank" rel="noopener" class="muted" style="font-size:12.5px">Manage goals ↗</a></div>
+    <div id="x-custom" class="row" style="margin-top:8px">
+      <select id="x-gt" style="width:210px"><option value="click">Click on an element</option><option value="pageview">Visit a page</option><option value="event">Custom event</option><option value="form">Form submitted</option></select>
       <input id="x-gv" type="text" class="grow" placeholder="#buy-button"></div>
-    <div class="muted" id="x-gh" style="font-size:12.5px;margin-top:4px">CSS selector of the button/link visitors should click.</div>
+    <div class="muted" id="x-gh" style="font-size:12.5px;margin-top:4px"></div>
+    <div id="x-secondary" style="margin-top:10px"></div>
+
+    <hr style="border:0;border-top:1px solid var(--border);margin:14px 0">
+    <div class="lbl2" style="margin-bottom:6px">Step 4 · When can it be called?</div>
+    <div class="grid g3">
+      <div class="field"><label for="x-minv">Min. visitors per version</label><input id="x-minv" type="number" min="0" value="100"></div>
+      <div class="field"><label for="x-mind">Min. days running</label><input id="x-mind" type="number" min="0" max="90" value="7"></div>
+      <div class="field"><label for="x-base">Sample-size helper: current rate (%)</label><div class="row"><input id="x-base" type="number" min="0.1" max="99" step="0.1" placeholder="e.g. 5" style="width:90px"><span class="muted" id="x-need" style="font-size:12.5px"></span></div></div></div>
+    <label class="switch"><input type="checkbox" id="x-auto"><span><div class="t">Finish automatically when there is a clear winner</div><div class="d">Ends the test once a version beats the original with strong evidence (corrected for several versions, ≥95% probability, enough visitors and days, no traffic-split problems).</div></span></label>
+    <label class="switch"><input type="checkbox" id="x-ship"><span><div class="t">Keep serving the winner to everyone afterwards</div><div class="d">When the test ends with a winning version, that version stays on for all visitors until you turn it off.</div></span></label>
     <div id="x-err" class="bad" style="margin-top:10px"></div>`,
     { wide: true, footer: `<span class="muted" style="margin-right:auto">Saved as a draft — you start it from the A/B tests page.</span><button class="btn" data-close>Cancel</button><button class="btn primary" id="x-create">Create test</button>` });
-  const el = m.el;
-  const render = () => {
-    $("#x-count", el).textContent = `(${EDITOR.changes.length})`;
-    $("#x-list", el).innerHTML = EDITOR.changes.length ? `<div class="table-wrap"><table><tbody>${EDITOR.changes.map((c, i) => `<tr><td><code>${esc(c.action + (c.attr ? ":" + c.attr : ""))}</code></td>
-      <td class="mono" style="word-break:break-all">${esc(c.selector)}</td><td style="word-break:break-all">${esc(c.value.slice(0, 60))}</td><td class="right"><button class="btn sm" data-rm="${i}">✕</button></td></tr>`).join("")}</tbody></table></div>`
-      : `<div class="muted">No changes yet — version B would look identical to the original.</div>`;
-    $$("[data-rm]", el).forEach(b => b.onclick = () => { EDITOR.changes.splice(+b.dataset.rm, 1); render(); });
+  const el = m.el, g = id => $(id, el).value.trim();
+  const audience = audiencePicker($("#x-audience", el), site, segments, {});
+
+  // ---- versions
+  const nameOf = i => i === 0 ? "Original" : V.list[i].key;
+  const renderVersions = () => {
+    const tot = V.list.reduce((a, v) => a + Math.max(+v.weight || 0, 0), 0) || 1;
+    $("#x-tabs", el).innerHTML = V.list.map((v, i) => `<button type="button" role="tab" data-vt="${i}" class="${V.sel === i ? "on" : ""}">${esc(nameOf(i))}${i === 0 ? ' <span class="muted">(control)</span>' : ""}</button>`).join("")
+      + (V.list.length < 6 ? `<button type="button" id="x-addv" style="color:var(--accent)">＋ Add version</button>` : "");
+    $("#x-split", el).innerHTML = `<div class="row" style="gap:14px">Traffic split: ${V.list.map((v, i) => `<span>${esc(nameOf(i))} <input type="number" data-w="${i}" min="0" max="100" value="${v.weight}" style="width:62px;display:inline-block"> <span class="muted">${Math.round((+v.weight || 0) / tot * 100)}%</span></span>`).join("")}</div>`;
+    const v = V.list[V.sel];
+    $("#x-version", el).innerHTML = V.sel === 0
+      ? `<div class="callout">This is the original page — visitors in this group see no changes. Everything is compared against it.</div>`
+      : `<div class="row" style="margin-bottom:8px"><label class="lbl2" for="x-key">Version name</label><input id="x-key" type="text" value="${esc(v.key)}" style="width:170px" maxlength="40">
+          ${V.list.length > 2 ? `<button class="btn sm danger" type="button" id="x-rmv">Remove this version</button>` : ""}</div>
+        <div class="row"><input id="x-page" type="text" class="grow" placeholder="https://yoursite.com/page-to-edit" value="${esc(lastUrl)}"><button class="btn primary" type="button" id="x-open">Open visual editor</button></div>
+        <div class="muted" id="x-msg" style="margin:6px 0 10px;font-size:12.5px">Your page opens in a new tab. Click any element, change text, colour, size or link, or hide it, then press “Done”. The snippet must already be on that page.</div>
+        <div class="lbl2">Changes in ${esc(v.key)} <span class="muted" id="x-count"></span></div><div id="x-list" style="margin-bottom:10px"></div>
+        <details><summary class="muted" style="cursor:pointer">Add a change by CSS selector, or redirect to another URL</summary>
+          <div class="row" style="margin-top:8px"><input id="x-sel" type="text" class="grow" placeholder="CSS selector e.g. h1">
+            <select id="x-act" style="width:110px"><option>text</option><option>html</option><option>css</option><option>hide</option></select>
+            <input id="x-val" type="text" class="grow" placeholder="New value"><button class="btn sm" type="button" id="x-add">Add</button></div>
+          <div class="row" style="margin-top:8px"><label class="lbl2" for="x-redir">Or send visitors to</label><input id="x-redir" type="text" class="grow" placeholder="https://yoursite.com/new-landing-page (split-URL test)" value="${esc(v.redirect_url)}"></div></details>`;
+    $$("[data-vt]", el).forEach(b => b.onclick = () => { V.sel = +b.dataset.vt; EDITOR.changes = V.list[V.sel].changes; renderVersions(); });
+    const add = $("#x-addv", el);
+    if (add) add.onclick = () => {
+      const used = new Set(V.list.map(x => x.key)); let k = "";
+      for (const L of VERSION_LETTERS) { k = "variant_" + L.toLowerCase(); if (!used.has(k)) break; }
+      V.list.push({ key: k, weight: 50, changes: [], redirect_url: "" }); V.sel = V.list.length - 1; EDITOR.changes = V.list[V.sel].changes; renderVersions();
+    };
+    $$("[data-w]", el).forEach(inp => inp.oninput = () => { V.list[+inp.dataset.w].weight = Math.max(0, +inp.value || 0); renderSplitOnly(); });
+    if (V.sel > 0) {
+      $("#x-key", el).oninput = e => { V.list[V.sel].key = e.target.value.trim().replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 40); };
+      $("#x-key", el).onchange = () => renderVersions();
+      const rm = $("#x-rmv", el); if (rm) rm.onclick = () => { V.list.splice(V.sel, 1); V.sel = Math.min(V.sel, V.list.length - 1) || 1; EDITOR.changes = V.list[V.sel].changes; renderVersions(); };
+      $("#x-redir", el).oninput = e => { V.list[V.sel].redirect_url = e.target.value.trim(); };
+      $("#x-add", el).onclick = () => {
+        const c = { selector: g("#x-sel"), action: $("#x-act", el).value, value: $("#x-val", el).value, attr: "" };
+        if (!c.selector) return;
+        V.list[V.sel].changes.push(c); EDITOR.changes = V.list[V.sel].changes; $("#x-sel", el).value = ""; $("#x-val", el).value = ""; renderChanges();
+      };
+      $("#x-open", el).onclick = () => {
+        let u;
+        try { u = new URL(g("#x-page")); if (!/^https?:$/.test(u.protocol)) throw 0; }
+        catch { $("#x-msg", el).textContent = "Enter the full page address, starting with http:// or https://"; return; }
+        try { localStorage.setItem("ot_last_url_" + site.id, u.href); } catch { /* ignore */ }
+        lastUrl = u.href; u.hash = "ot_editor";
+        EDITOR.changes = V.list[V.sel].changes;
+        EDITOR.win = window.open(u.href, "ot_editor");
+        $("#x-msg", el).textContent = EDITOR.win ? "Editor opened in a new tab. If no toolbar appears there, the snippet isn't installed on that page (or the site blocks scripts)."
+          : "Your browser blocked the popup — allow popups for this page and try again.";
+      };
+      renderChanges();
+    }
   };
-  EDITOR.onChange = render; render();
-  const hints = { click: ["#buy-button", "CSS selector of the button/link visitors should click."], pageview: ["/thank-you", "A visit to a URL containing this text counts as a conversion."], event: ["purchase", "Name used in OT.track('name') on your site."] };
-  $("#x-gt", el).onchange = e => { const h = hints[e.target.value]; $("#x-gv", el).placeholder = h[0]; $("#x-gh", el).textContent = h[1]; };
-  $("#x-add", el).onclick = () => {
-    const c = { selector: $("#x-sel", el).value.trim(), action: $("#x-act", el).value, value: $("#x-val", el).value, attr: "" };
-    if (!c.selector) return;
-    EDITOR.changes.push(c); $("#x-sel", el).value = ""; $("#x-val", el).value = ""; render();
+  const renderSplitOnly = () => {
+    const tot = V.list.reduce((a, v) => a + Math.max(+v.weight || 0, 0), 0) || 1;
+    $$("[data-w]", el).forEach(inp => { const sp = inp.nextElementSibling; if (sp) sp.textContent = Math.round((+V.list[+inp.dataset.w].weight || 0) / tot * 100) + "%"; });
   };
-  $("#x-open", el).onclick = () => {
-    let u;
-    try { u = new URL($("#x-page", el).value.trim()); if (!/^https?:$/.test(u.protocol)) throw 0; }
-    catch { $("#x-msg", el).textContent = "Enter the full page address, starting with http:// or https://"; return; }
-    try { localStorage.setItem("ot_last_url_" + site.id, u.href); } catch { /* ignore */ }
-    u.hash = "ot_editor";
-    EDITOR.win = window.open(u.href, "ot_editor");
-    $("#x-msg", el).textContent = EDITOR.win ? "Editor opened in a new tab. If no toolbar appears there, the snippet isn't installed on that page (or the site blocks scripts)."
-      : "Your browser blocked the popup — allow popups for this page and try again.";
+  const renderChanges = () => {
+    const cur = V.list[V.sel]; if (V.sel === 0 || !$("#x-list", el)) return;
+    cur.changes = EDITOR.changes;
+    $("#x-count", el).textContent = `(${cur.changes.length})`;
+    $("#x-list", el).innerHTML = cur.changes.length ? `<div class="table-wrap"><table><tbody>${cur.changes.map((c, i) => `<tr><td><code>${esc(c.action + (c.attr ? ":" + c.attr : ""))}</code></td>
+      <td class="mono" style="word-break:break-all">${esc(c.selector)}</td><td style="word-break:break-all">${esc((c.value || "").slice(0, 60))}</td><td class="right"><button class="btn sm" type="button" data-rm="${i}">✕</button></td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="muted">No changes yet — this version would look identical to the original.</div>`;
+    $$("[data-rm]", el).forEach(b => b.onclick = () => { cur.changes.splice(+b.dataset.rm, 1); EDITOR.changes = cur.changes; renderChanges(); });
   };
+  EDITOR.onChange = renderChanges;
+  renderVersions();
+
+  // ---- goal
+  const hints = { click: ["#buy-button", "CSS selector of the button/link visitors should click."], pageview: ["/thank-you", "A visit to a URL containing this text counts as a conversion."],
+    event: ["purchase", "Name used in OT.track('name') on your site."], form: ["contact", "The form's id, name or action."] };
+  const syncGoal = () => {
+    const custom = g("#x-goal") === "__custom";
+    $("#x-custom", el).style.display = custom ? "" : "none"; $("#x-gh", el).style.display = custom ? "" : "none";
+    const h = hints[$("#x-gt", el).value]; $("#x-gv", el).placeholder = h[0]; $("#x-gh", el).textContent = h[1];
+    const others = saved.filter(x => x.id !== g("#x-goal"));
+    $("#x-secondary", el).innerHTML = others.length ? `<div class="lbl2" style="margin-bottom:4px">Also measure (optional)</div>` + others.map(x =>
+      `<label class="switch" style="padding:2px 0"><input type="checkbox" data-sec="${esc(x.id)}"><span><div class="t">${esc(x.name)}</div></span></label>`).join("") : "";
+  };
+  $("#x-goal", el).onchange = syncGoal; $("#x-gt", el).onchange = syncGoal; syncGoal();
+
+  // ---- sample-size helper
+  $("#x-base", el).oninput = () => {
+    const n = sampleSize((+$("#x-base", el).value || 0) / 100, 0.10);
+    $("#x-need", el).innerHTML = n ? `needs about <b>${fmtNum(n)}</b> visitors per version to detect a 10% lift <button class="btn sm" type="button" id="x-use">Use</button>` : "";
+    const u = $("#x-use", el); if (u) u.onclick = () => { $("#x-minv", el).value = n; };
+  };
+
   $("#x-create", el).onclick = async () => {
-    const g = id => $(id, el).value.trim(), gt = g("#x-gt"), gv = g("#x-gv");
+    const err = t => { $("#x-err", el).textContent = t; };
+    if (!g("#x-name")) return err("Give the test a name.");
+    const keys = V.list.map(v => v.key);
+    if (keys.some(k => !k)) return err("Every version needs a name.");
+    if (new Set(keys.map(k => k.toLowerCase())).size !== keys.length) return err("Version names must be different.");
+    const empty = V.list.slice(1).find(v => !v.changes.length && !v.redirect_url);
+    if (empty) return err(`“${empty.key}” has no changes yet — it would look identical to the original.`);
+    if (V.list.reduce((a, v) => a + (+v.weight || 0), 0) <= 0) return err("Give at least one version some traffic.");
+    const gsel = g("#x-goal"), gt = g("#x-gt"), gv = g("#x-gv"), custom = gsel === "__custom";
+    if (custom && !gv) return err("Tell us what counts as a win (step 3).");
+    const aud = audience.get();
     const body = {
       name: g("#x-name"), url_contains: g("#x-url"), traffic: +g("#x-traffic") || 100,
-      variants: [{ key: "control", weight: 50 }, { key: "variant_b", weight: 50, changes: EDITOR.changes }],
-      goal: { type: gt, selector: gt === "click" ? gv : "", url_contains: gt === "pageview" ? gv : "", name: gt === "event" ? gv : "" },
+      variants: V.list.map(v => ({ key: v.key, weight: Math.round(+v.weight || 0), changes: v.changes, redirect_url: v.redirect_url || "" })),
+      ...(custom ? { goal: { type: gt, selector: gt === "click" ? gv : "", url_contains: gt === "pageview" ? gv : "", name: gt === "event" ? gv : "", form_name: gt === "form" ? gv : "" } } : { goal_id: gsel }),
+      secondary_goal_ids: $$("[data-sec]:checked", el).map(c => c.dataset.sec),
+      segment_id: aud.segment_id, rules: aud.rules, match: aud.match,
+      auto_winner: $("#x-auto", el).checked, ship_winner: $("#x-ship", el).checked,
+      min_visitors: Math.max(0, parseInt($("#x-minv", el).value, 10) || 0), min_days: Math.max(0, parseInt($("#x-mind", el).value, 10) || 0),
     };
-    if (!body.name) { $("#x-err", el).textContent = "Give the test a name."; return; }
-    if (!gv) { $("#x-err", el).textContent = "Tell us what counts as a win (step 2)."; return; }
     try { await api(`/api/sites/${site.id}/experiments`, { method: "POST", body }); EDITOR.onChange = null; m.close(); toast("Test created as a draft — press Start when ready"); route(); }
-    catch (e) { $("#x-err", el).textContent = e.message; }
+    catch (e) { err(e.message); }
   };
+  m.onClose = () => { if (EDITOR.onChange === renderChanges) EDITOR.onChange = null; };
 }
 
 // ---------------------------------------------------------------- campaign editor (create + edit)
@@ -230,18 +338,11 @@ ${safeJs}
 
 function openNewCampaign(site, opts) { openCampaignModal(site, null, opts || {}); }
 
-function openCampaignModal(site, existing, opts = {}) {
+async function openCampaignModal(site, existing, opts = {}) {
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
   const cfg = existing ? existing.config : null;
   const act = cfg ? cfg.actions[0] : null;
-  const fields = [["returning", "Returning visitor (true/false)"], ["visit_no", "Visit number"], ["days_since_last", "Days since last visit"], ["days_since_first", "Days since first visit"],
-    ["utm_source", "UTM source"], ["utm_medium", "UTM medium"], ["utm_campaign", "UTM campaign"], ["device", "Device (mobile/tablet/desktop)"], ["country", "Country code (e.g. IN)"],
-    ["hour", "Hour of day (0–23)"], ["weekday", "Weekday (0=Sun)"], ["url", "Page URL"], ["referrer", "Referrer"]];
-  const ops = [["eq", "is"], ["neq", "is not"], ["gte", "≥"], ["lte", "≤"], ["contains", "contains"]];
-  const rule = i => (cfg && cfg.rules[i]) || { field: "", op: "eq", value: "" };
   const sel = (id, opts, cur, extra = "") => `<select id="${id}" ${extra}>${opts.map(([k, l]) => `<option value="${k}" ${String(cur) === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
-  const ruleRow = i => `<div class="row" style="margin-bottom:8px">
-    <select id="c-f${i}" style="width:230px"><option value="">${i ? "(optional) another rule" : "(everyone)"}</option>${fields.map(([k, l]) => `<option value="${k}" ${rule(i).field === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
-    ${sel("c-o" + i, ops, rule(i).op, 'style="width:100px"')}<input id="c-v${i}" type="text" class="grow" placeholder="value e.g. true, 3, google, mobile" value="${esc(rule(i).value)}"></div>`;
   const v = (k, d = "") => (act && act[k] != null && act[k] !== "" ? act[k] : d);
   const type0 = act ? (act.type === "change" ? "visual" : act.type) : (opts.visual ? "visual" : "banner");
 
@@ -250,12 +351,11 @@ function openCampaignModal(site, existing, opts = {}) {
 
     <div class="row" style="justify-content:space-between"><div class="lbl2" style="margin:0 0 6px">1 · Who should see it?</div>
       <button class="btn sm" id="c-preset3" type="button">Preset: show on the 3rd visit</button></div>
-    ${ruleRow(0)}${ruleRow(1)}
-    <div class="row" style="margin-bottom:6px">
-      ${sel("c-match", [["all", "All rules must match"], ["any", "Any rule can match"]], cfg ? cfg.match : "all", 'style="width:190px"')}
+    <div id="c-audience"></div>
+    <div class="row" style="margin:12px 0 6px">
       ${sel("c-freq", [["once", "Show once per visitor"], ["session", "Once per visit"], ["always", "Every page load"]], cfg ? cfg.frequency : (type0 === "visual" ? "always" : "once"), 'style="width:190px"')}
       <input id="c-url" type="text" class="grow" placeholder="Only on URLs containing… (blank = all)" value="${esc(cfg ? cfg.url_contains : "")}"></div>
-    <div class="muted" style="font-size:12.5px;margin-bottom:14px">A <b>visit</b> is a new session — 30 minutes after the previous page view. “Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
+    <div class="muted" style="font-size:12.5px;margin-bottom:14px">“Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
 
     <div class="lbl2" style="margin-bottom:6px">2 · What should they see?</div>
     <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"]], type0, 'style="max-width:420px"')}</div>
@@ -296,7 +396,12 @@ function openCampaignModal(site, existing, opts = {}) {
         Tip: leave <b>Show</b> on “Every page load” so the edits stay on the page, and set “Only on URLs containing…” (e.g. <code>/index.html</code>) to limit them to this page.</div>
       <div class="lbl2">Changes <span class="muted" id="vz-count"></span></div><div id="vz-list"></div>
     </div>
-    <div class="lbl2" style="margin:16px 0 6px">3 · Preview it on your page</div>
+    <div class="lbl2" style="margin:16px 0 6px">3 · What counts as a conversion? <span class="muted">(optional)</span></div>
+    <div class="row"><select id="c-goal" style="max-width:360px"><option value="">None — just count views and clicks</option>
+      ${goals.filter(x => !x.archived).map(x => `<option value="${esc(x.id)}" ${cfg && cfg.goal_id === x.id ? "selected" : ""}>${esc(x.name)} — ${esc(GOAL_TYPE_LABEL[x.type])}</option>`).join("")}</select>
+      <a href="#/site/${esc(site.id)}/goals" target="_blank" rel="noopener" class="muted" style="font-size:12.5px">Manage goals ↗</a></div>
+    <div class="muted" style="font-size:12.5px;margin-top:4px">Counts a visitor who completes this goal after being shown the campaign (forms inside custom-code campaigns are always counted).</div>
+    <div class="lbl2" style="margin:16px 0 6px">4 · Preview it on your page</div>
     <div class="row"><input id="pv-url" type="text" class="grow" placeholder="https://yoursite.com/page" value="${esc(suggestPageUrl(site))}">
       <button class="btn primary" type="button" id="pv-here">Show here</button><button class="btn" type="button" id="pv-new">Open in new tab</button>
       <div class="seg" role="group" aria-label="Preview size"><button type="button" data-pvw="desktop" class="on">Desktop</button><button type="button" data-pvw="mobile">Mobile</button></div></div>
@@ -307,6 +412,7 @@ function openCampaignModal(site, existing, opts = {}) {
     <div id="c-err" class="bad" style="margin-top:10px"></div>`,
     { wide: true, footer: `<span class="muted" style="margin-right:auto">${existing ? "Changes go live within a minute for running campaigns." : "Saved as a draft — start it from the Personalization page."}</span><button class="btn" data-close>Cancel</button><button class="btn primary" id="c-save">${existing ? "Save changes" : "Create campaign"}</button>` });
   const el = m.el, g = id => $(id, el).value.trim();
+  const audience = audiencePicker($("#c-audience", el), site, segments, cfg ? { segment_id: cfg.segment_id, rules: cfg.rules, match: cfg.match } : {});
 
   const HELP = {
     html: "Your markup. <b>&lt;script&gt;</b> tags (including external ones like HubSpot's loader) are executed, in order.",
@@ -361,9 +467,8 @@ function openCampaignModal(site, existing, opts = {}) {
   });
   function confirmReplace() { return window.confirm("Replace the code in all three tabs with this template?"); }
   $("#c-preset3", el).onclick = () => {
-    $("#c-f0", el).value = "visit_no"; $("#c-o0", el).value = "gte"; $("#c-v0", el).value = "3";
-    $("#c-f1", el).value = ""; $("#c-v1", el).value = "";
-    $("#c-freq", el).value = "once"; $("#c-match", el).value = "all";
+    audience.setRules([{ field: "visit_no", op: "gte", value: "3" }], "all");
+    $("#c-freq", el).value = "once";
     toast("Rule set: visit number ≥ 3, once per visitor");
   };
   $("#c-prev", el).onclick = () => {
@@ -399,10 +504,10 @@ function openCampaignModal(site, existing, opts = {}) {
   };
 
   const buildBody = () => {
-    const rules = [0, 1].map(i => ({ field: g("#c-f" + i), op: g("#c-o" + i), value: g("#c-v" + i) })).filter(r => r.field);
+    const aud = audience.get(), rules = aud.rules, common = { match: aud.match, segment_id: aud.segment_id, goal_id: g("#c-goal") };
     const type = g("#c-type");
     if (type === "visual") {
-      return { name: g("#c-name"), url_contains: g("#c-url"), match: g("#c-match"), frequency: g("#c-freq"), rules,
+      return { name: g("#c-name"), url_contains: g("#c-url"), ...common, frequency: g("#c-freq"), rules,
         actions: EDITOR.changes.map(c => ({ type: "change", selector: c.selector, action: c.action, value: c.value, attr: c.attr || "" })) };
     }
     const action = type === "custom" ? {
@@ -410,7 +515,7 @@ function openCampaignModal(site, existing, opts = {}) {
       display: g("#c-display"), trigger: g("#c-trigger"), trigger_value: Math.max(0, parseInt($("#c-tv", el).value, 10) || 0),
       selector: g("#c-sel"), insert: g("#c-ins"),
     } : { type, text: g("#c-text"), title: g("#c-title"), cta_text: g("#c-cta"), cta_url: g("#c-cta-url"), position: g("#c-pos"), bg: $("#c-bg", el).value, fg: $("#c-fg", el).value };
-    return { name: g("#c-name"), url_contains: g("#c-url"), match: g("#c-match"), frequency: g("#c-freq"), rules, actions: [action] };
+    return { name: g("#c-name"), url_contains: g("#c-url"), ...common, frequency: g("#c-freq"), rules, actions: [action] };
   };
 
   // ---- preview on the real page (popup tab or embedded frame); the page asks for the config via postMessage

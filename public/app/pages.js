@@ -139,20 +139,37 @@ async function pageOverview(view) {
 
 // ---------------------------------------------------------------- A/B tests
 function goalText(g) {
-  return g.type === "click" ? `Click on <code>${esc(g.selector)}</code>` : g.type === "pageview" ? `Visit a URL containing <code>${esc(g.url_contains)}</code>` : `Event <code>${esc(g.name)}</code>`;
+  if (!g) return "–";
+  return g.type === "click" ? `Click on <code>${esc(g.selector)}</code>` : g.type === "pageview" ? `Visit a URL containing <code>${esc(g.url_contains)}</code>`
+    : g.type === "form" ? `Submit form <code>${esc(g.form_name)}</code>` : `Event <code>${esc(g.name)}</code>`;
 }
-function resultsTable(r) {
-  const win = r.variants.find(v => v.significant && v.uplift > 0);
-  const lose = r.variants.find(v => v.significant && v.uplift < 0);
-  const verdict = win ? `<div class="callout good"><b>${esc(win.variant)} is winning</b> (+${(win.uplift * 100).toFixed(1)}% conversion, p=${win.p_value.toFixed(3)}).</div>`
-    : lose ? `<div class="callout warn"><b>${esc(lose.variant)} is losing</b> to control (${(lose.uplift * 100).toFixed(1)}%).</div>`
-    : `<div class="callout">No clear winner yet. Keep the test running until you reach the sample size you planned.</div>`;
-  return `<div class="table-wrap"><table><thead><tr><th>Variant</th><th class="right">Visitors</th><th class="right">Conversions</th><th class="right">Rate</th><th class="right">Uplift</th><th class="right">p-value</th></tr></thead><tbody>
-    ${r.variants.map(v => `<tr><td>${esc(v.variant)} ${v.is_control ? '<span class="muted">(control)</span>' : ""}</td><td class="right">${fmtNum(v.visitors)}</td>
-      <td class="right">${fmtNum(v.conversions)}</td><td class="right">${pct(v.rate)}</td>
-      <td class="right ${v.uplift > 0 ? "good" : v.uplift < 0 ? "bad" : ""}">${v.uplift == null ? "–" : (v.uplift * 100).toFixed(1) + "%"}</td>
-      <td class="right">${v.p_value == null ? "–" : v.p_value.toFixed(3)}${v.significant ? ' <b class="good">significant</b>' : ""}</td></tr>`).join("")}</tbody></table></div>
-    <div style="margin-top:10px">${verdict}</div><div class="muted" style="margin-top:8px;font-size:12px">${esc(r.note)}</div>`;
+function audienceText(cfg, segs) {
+  const seg = cfg.segment_id && segs.find(x => x.id === cfg.segment_id);
+  if (seg) return `Audience: <b>${esc(seg.name)}</b>`;
+  return cfg.rules && cfg.rules.length ? `Audience: ${esc(rulesText(cfg.rules, cfg.match))}` : "All visitors";
+}
+function resultsTable(r, exp) {
+  const ctrl = r.variants.find(v => v.is_control), multi = r.variants.length > 2;
+  const star = v => (r.winner === v.variant ? ' <span class="pill running" title="Winner">★ winner</span>' : "");
+  const ci = v => `${pct(v.rate, 2)} <span class="muted" style="font-size:11px">(${pct(v.ci_low, 1)}–${pct(v.ci_high, 1)})</span>`;
+  const smallest = Math.min(...r.variants.map(v => v.visitors));
+  const tone = r.srm.flag ? "warn" : r.winner && r.winner !== (ctrl && ctrl.variant) ? "good" : "";
+  const done = r.status === "completed";
+  return `${r.srm.flag ? `<div class="callout warn" style="margin-bottom:10px"><b>Traffic split looks wrong (sample ratio mismatch).</b> The number of visitors per version doesn't match the split you set (p=${r.srm.p_value.toFixed(5)}). Don't trust these results until you find out why — for example a redirect, a page that blocks the script, or targeting that treats versions differently.</div>` : ""}
+    <div class="table-wrap"><table><thead><tr><th>Version</th><th class="right">Visitors</th><th class="right">Conversions</th><th class="right">Rate (95% range)</th><th class="right">Uplift</th><th class="right" title="Bayesian probability that this version really converts better than the original">Beats original</th><th class="right" title="${multi ? "Corrected for comparing several versions (Bonferroni)" : "Two-sided z-test"}">p-value${multi ? " (adj.)" : ""}</th></tr></thead><tbody>
+    ${r.variants.map(v => `<tr><td>${esc(v.variant)} ${v.is_control ? '<span class="muted">(control)</span>' : ""}${star(v)}</td><td class="right">${fmtNum(v.visitors)}</td>
+      <td class="right">${fmtNum(v.conversions)}</td><td class="right">${ci(v)}</td>
+      <td class="right ${v.uplift > 0 ? "good" : v.uplift < 0 ? "bad" : ""}">${v.uplift == null ? "–" : (v.uplift > 0 ? "+" : "") + (v.uplift * 100).toFixed(1) + "%"}</td>
+      <td class="right">${v.prob_beat_control == null ? "–" : Math.round(v.prob_beat_control * 100) + "%"}</td>
+      <td class="right">${v.p_value == null ? "–" : (multi ? v.p_adjusted : v.p_value).toFixed(3)}${v.significant ? ' <b class="good">significant</b>' : ""}</td></tr>`).join("")}</tbody></table></div>
+    <div class="callout ${tone}" style="margin-top:10px">${esc(r.recommendation)}</div>
+    ${r.needed_per_variant ? `<div class="muted" style="margin-top:8px;font-size:12.5px">Sample: smallest version has <b>${fmtNum(smallest)}</b> visitors; about <b>${fmtNum(r.needed_per_variant)}</b> per version are needed to detect a 10% lift at today's conversion rate
+      <div class="bar" style="margin-top:4px;max-width:340px"><i style="width:${Math.min(100, smallest / r.needed_per_variant * 100).toFixed(0)}%"></i></div></div>` : ""}
+    ${r.secondary && r.secondary.length ? r.secondary.map(sg => `<details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Also measured: ${esc(sg.name)}</summary><div class="table-wrap"><table><thead><tr><th>Version</th><th class="right">Visitors</th><th class="right">Converted</th><th class="right">Rate</th></tr></thead><tbody>
+      ${sg.variants.map(v => `<tr><td>${esc(v.variant)}</td><td class="right">${fmtNum(v.visitors)}</td><td class="right">${fmtNum(v.converters)}</td><td class="right">${pct(v.rate, 2)}</td></tr>`).join("")}</tbody></table></div></details>`).join("") : ""}
+    ${done ? `<div class="muted" style="margin-top:8px;font-size:12.5px">Completed${r.completed_reason === "auto" ? " automatically" : r.completed_reason === "manual" ? " by you" : ""}${r.winner ? " — winner: <b>" + esc(r.winner) + "</b>" : ""}.</div>`
+      : `<div class="row" style="margin-top:10px"><span class="muted" style="font-size:12.5px">End the test and pick a winner:</span>${r.variants.map(v => `<button class="btn sm" data-win="${esc(exp.id)}:${esc(v.variant)}">${v.is_control ? "Keep original" : "Use " + esc(v.variant)}</button>`).join("")}</div>`}
+    <div class="muted" style="margin-top:8px;font-size:12px">${esc(r.note)}</div>`;
 }
 const statusButtons = (kind, id, status) => ["running", "paused", "completed"].filter(x => x !== status).map(x =>
   `<button class="btn sm" data-st="${kind}:${esc(id)}:${x}">${x === "running" ? (status === "paused" ? "Resume" : "Start") : x === "paused" ? "Pause" : "Complete"}</button>`).join("");
@@ -165,19 +182,30 @@ function bindStatus(view) {
 }
 async function pageExperiments(view) {
   const s = curSite();
-  const exps = await api(`/api/sites/${s.id}/experiments`);
+  const [exps, segs] = await Promise.all([api(`/api/sites/${s.id}/experiments`), api(`/api/sites/${s.id}/segments`).catch(() => [])]);
   const results = await Promise.all(exps.map(e => api(`/api/experiments/${e.id}/results`).catch(() => null)));
-  view.innerHTML = siteHead("A/B tests", "Show different versions of a page to different visitors and measure which converts better. Build changes with the point-and-click editor.",
+  view.innerHTML = siteHead("A/B tests", "Show different versions of a page to different visitors and measure which converts better. Build changes with the point-and-click editor; test two versions or several.",
     `<button class="btn primary" id="new-exp">＋ New A/B test</button>`) +
-    (exps.length ? exps.map((e, i) => `<div class="card card-pad" style="margin-bottom:16px">
-      <div class="row" style="justify-content:space-between"><div><b style="font-size:15px">${esc(e.name)}</b> <span class="pill ${esc(e.status)}">${esc(e.status)}</span>
-        <div class="muted" style="margin-top:2px">${e.config.url_contains ? "Runs on URLs containing <code>" + esc(e.config.url_contains) + "</code>" : "Runs on all pages"} · ${e.config.traffic}% of traffic · Goal: ${goalText(e.config.goal)}</div></div>
-        <div class="row">${statusButtons("experiments", e.id, e.status)}</div></div>
-      <div style="margin-top:12px">${results[i] && results[i].variants.some(v => v.visitors) ? resultsTable(results[i]) : `<div class="muted">No visitors have seen this test yet${e.status === "draft" ? " — press Start to begin" : ""}.</div>`}</div>
-      <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">Changes in the variant (${e.config.variants[1]?.changes.length || 0})</summary>
-        <div class="table-wrap"><table><tbody>${(e.config.variants[1]?.changes || []).map(c => `<tr><td><code>${esc(c.action + (c.attr ? ":" + c.attr : ""))}</code></td><td><code>${esc(c.selector)}</code></td><td>${esc((c.value || "").slice(0, 80))}</td></tr>`).join("") || '<tr><td class="muted">None</td></tr>'}</tbody></table></div></details></div>`).join("")
+    (exps.length ? exps.map((e, i) => {
+      const r = results[i], c = e.config, status = r ? r.status : e.status;
+      return `<div class="card card-pad" style="margin-bottom:16px">
+      <div class="row" style="justify-content:space-between"><div><b style="font-size:15px">${esc(e.name)}</b> <span class="pill ${esc(status)}">${esc(status)}</span>
+        <div class="muted" style="margin-top:2px">${c.url_contains ? "Runs on URLs containing <code>" + esc(c.url_contains) + "</code>" : "Runs on all pages"} · ${c.traffic}% of traffic · ${c.variants.length} versions · ${audienceText(c, segs)}</div>
+        <div class="muted">Goal: ${goalText(c.goal)}${c.auto_winner ? " · auto-finish on" : ""}${c.ship_winner ? " · keeps the winner on" : ""}</div></div>
+        <div class="row">${status === "completed" ? "" : statusButtons("experiments", e.id, status)}</div></div>
+      <div style="margin-top:12px">${r && r.variants.some(v => v.visitors) ? resultsTable(r, e) : `<div class="muted">No visitors have seen this test yet${status === "draft" ? " — press Start to begin" : ""}.</div>`}</div>
+      <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">What each version changes</summary>
+        ${c.variants.slice(1).map(v => `<div style="margin-top:8px"><b>${esc(v.key)}</b> <span class="muted">· ${esc(v.weight)} weight${v.redirect_url ? " · sends visitors to " + esc(v.redirect_url) : ""}</span>
+        <div class="table-wrap"><table><tbody>${(v.changes || []).map(ch => `<tr><td><code>${esc(ch.action + (ch.attr ? ":" + ch.attr : ""))}</code></td><td><code>${esc(ch.selector)}</code></td><td>${esc((ch.value || "").slice(0, 80))}</td></tr>`).join("") || '<tr><td class="muted">No element changes</td></tr>'}</tbody></table></div></div>`).join("")}</details></div>`;
+    }).join("")
     : `<div class="card empty"><b>No A/B tests yet</b>Create one, change something on your page with the visual editor, and see which version wins.<br><br><button class="btn primary" id="new-exp-2">＋ Create your first test</button></div>`);
   bindStatus(view);
+  $$("[data-win]", view).forEach(b => b.onclick = async () => {
+    const [id, variant] = b.dataset.win.split(":");
+    if (!confirm(`End this test and declare “${variant}” the winner?`)) return;
+    try { await api(`/api/experiments/${id}/winner`, { method: "POST", body: { variant } }); toast("Test completed"); route(); }
+    catch (e) { toast(e.message, true); }
+  });
   ["#new-exp", "#new-exp-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => openNewExperiment(s); });
 }
 
@@ -190,12 +218,12 @@ function actionSummary(actions) {
 }
 async function pageCampaigns(view) {
   const s = curSite();
-  const camps = await api(`/api/sites/${s.id}/campaigns`);
+  const [camps, segs] = await Promise.all([api(`/api/sites/${s.id}/campaigns`), api(`/api/sites/${s.id}/segments`).catch(() => [])]);
   view.innerHTML = siteHead("Personalization", "Show banners and popups only to the visitors you choose — for example returning visitors, a third visit, a traffic source or mobile users.",
     `<button class="btn" id="new-visual">✎ Edit page visually</button><button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
     <div class="card">${camps.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Who sees it</th><th>Shown</th><th class="right">Seen by</th><th class="right">Clicked</th><th class="right">Converted</th><th></th></tr></thead><tbody>
       ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(actionSummary(c.config.actions))}</div></td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
-        <td class="muted">${c.config.rules.length ? c.config.rules.map(r => esc(`${r.field} ${r.op} ${r.value}`)).join(c.config.match === "any" ? " OR " : " AND ") : "Everyone"}</td>
+        <td class="muted">${(() => { const sg = c.config.segment_id && segs.find(x => x.id === c.config.segment_id); return sg ? `<b>${esc(sg.name)}</b><div>${esc(rulesText(sg.rules, sg.match))}</div>` : esc(rulesText(c.config.rules, c.config.match)); })()}</td>
         <td class="muted">${esc({ once: "Once per visitor", session: "Once per visit", always: "Every page load" }[c.config.frequency])}</td>
         <td class="right">${fmtNum(c.impressions)}</td><td class="right">${fmtNum(c.clicks)}</td><td class="right">${fmtNum(c.conversions)}</td>
         <td class="right nowrap"><button class="btn sm" data-edit-camp="${esc(c.id)}">Edit</button> ${statusButtons("campaigns", c.id, c.status)}</td></tr>`).join("")}</tbody></table></div>`
@@ -331,7 +359,14 @@ async function pageSettings(view) {
       ${sw("auto_scroll", "Scroll depth &amp; time on page", "How far people scroll (25/50/75/100%) and how long they are actively engaged.")}
       ${sw("auto_forms", "Form starts &amp; submits", "Which forms people start and finish. Only the form name is recorded, never the values.")}
       ${sw("auto_spa", "Single-page-app navigation", "Count route changes (React, Next.js, Vue…) as page views.")}</div>
-    <div class="card card-pad"><h2>5 · Privacy &amp; cookies</h2>
+    <div class="card card-pad" style="margin-bottom:16px"><h2>5 · Tell Optimize about your visitors <span class="muted" style="font-weight:400">(optional)</span></h2>
+      <p class="muted" style="margin-top:0">Pass facts you already know — a plan, a customer flag, the cart value — and target them in <b>Audiences</b> as “Custom attribute”. They stay in the visitor's browser; nothing personal is sent to Optimize.</p>
+      <div class="snippet"><pre>// after the snippet (works even before sdk.js has finished loading)
+window.OT = window.OT || { q: [] };
+OT.q.push(["identify", { plan: "pro", customer: true, cart_value: 120 }]);
+// later, e.g. when someone buys (also counts for the "customer" and "has done an event" rules):
+OT.track("purchase", { value: 49 });</pre></div></div>
+    <div class="card card-pad"><h2>6 · Privacy &amp; cookies</h2>
       ${sw("consent_required", "Require consent before tracking", "When on, nothing is stored or sent until your cookie banner calls <code>OT.consent(true)</code>. Recommended for EU/UK visitors.")}
       ${sw("restrict_origin", "Only accept events from my domain", "Ignores events sent from other websites. Best-effort protection against someone copying your snippet; needs the Domain above to be set (subdomains such as www. are allowed).")}
       <p class="muted" style="margin-bottom:6px">Optimize sets one first-party cookie (<code>_ot</code>, 1 year) and mirrors it in localStorage to recognise returning visitors. No IP address is stored.</p>
