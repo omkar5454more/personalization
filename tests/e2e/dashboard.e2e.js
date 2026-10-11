@@ -103,6 +103,30 @@ async function api(path, method = "GET", body) {
   const uc = camps.find(c => c.name === "UI campaign");
   check("campaign saved with rules + goal", uc && uc.config.rules[0].field === "visit_no" && uc.config.rules[0].op === "gte" && uc.config.goal_id && uc.config.goal.type === "event", JSON.stringify(uc && uc.config).slice(0, 300));
 
+  // ---- banner designer: live preview follows the controls, and the design is saved
+  await go("campaigns");
+  await w.openCampaignModal(w.eval("curSite()"), null, {}); await sleep(500);
+  m().querySelector("#c-name").value = "Designed banner";
+  const setv = (id, val, ev = "input") => { const e = m().querySelector(id); e.value = val; e.dispatchEvent(new w.Event(ev, { bubbles: true })); };
+  const tick = (id, on) => { const e = m().querySelector(id); e.checked = on; e.dispatchEvent(new w.Event("change", { bubbles: true })); };
+  setv("#c-text", "Big sale today");
+  check("live preview shows the message as you type", /Big sale today/.test(m().querySelector("#bn-live").textContent));
+  setv("#c-fs", "24"); setv("#c-align", "left", "change"); setv("#c-size", "large", "change"); setv("#c-radius", "16");
+  tick("#c-bold", true); tick("#c-close", false); setv("#c-cta", "Shop now"); tick("#c-ctab", true); setv("#c-ctabg", "#ff0000"); setv("#c-bg", "#112233");
+  const live = m().querySelector("#bn-live").innerHTML;
+  check("live preview reflects size, alignment, weight, corners, colours and a filled button",
+    /font:700 24px/.test(live) && /text-align:left/.test(live) && /border-radius:16px/.test(live) && /padding:18px/.test(live) && /#112233/i.test(live) && /#ff0000/i.test(live) && !/×/.test(live), live.slice(0, 300));
+  setv("#c-type", "popup", "change");
+  check("switching to popup shows a popup preview", /Big sale today/.test(m().querySelector("#bn-live").textContent) && /rgba\(0,0,0,\.45\)/.test(m().querySelector("#bn-live").innerHTML));
+  setv("#c-type", "banner", "change");
+  m().querySelector("#c-save").click(); await sleep(900);
+  const ds = (await api(`/api/sites/${site}/campaigns`)).find(c => c.name === "Designed banner");
+  const da = ds && ds.config.actions[0];
+  check("banner design saved with the campaign", da && da.font_size === 24 && da.align === "left" && da.size === "large" && da.radius === 16 && da.bold === true && da.closable === false && da.cta_bg === "#ff0000" && da.bg === "#112233", JSON.stringify(da));
+  await w.openCampaignModal(w.eval("curSite()"), ds, {}); await sleep(500);
+  check("re-opening the campaign restores the design controls", m().querySelector("#c-fs").value === "24" && m().querySelector("#c-align").value === "left" && m().querySelector("#c-bold").checked && !m().querySelector("#c-close").checked && m().querySelector("#c-ctab").checked);
+  m().querySelector("[data-close]").click(); await sleep(100);
+
   // ---- settings page documents OT.identify
   t = await go("settings");
   check("settings page documents OT.identify", /OT\.q\.push\(\["identify"/.test(t));

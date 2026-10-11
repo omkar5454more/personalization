@@ -299,19 +299,31 @@
     link.addEventListener("click", function () { push({ type: "click", exp: c.id, variant: "cta" }); flush(); });
     return link;
   }
+  // Banner look. NOTE: public/app/modals.js (bannerCss) draws the live preview in the dashboard with the same
+  // formula -- keep the two in sync.
+  var BANNER_PAD = { small: "6px", medium: "10px", large: "18px" };
+  function bannerCss(a) {
+    var pv = BANNER_PAD[a.size] || BANNER_PAD.medium, fs = a.font_size || 15, r = a.radius || 0;
+    return "padding:" + pv + " " + (a.closable === false ? "16px" : "44px") + " " + pv + " 16px;text-align:" + (a.align || "center") +
+      ";font:" + (a.bold ? "700 " : "") + fs + "px/1.4 system-ui,sans-serif;background:" + a.bg + ";color:" + a.fg + (r ? ";border-radius:" + r + "px" : "");
+  }
   function showBanner(c, a) {
-    var bar = el("div", "position:fixed;left:0;right:0;" + (a.position === "bottom" ? "bottom:0" : "top:0") +
-      ";z-index:2147483000;padding:10px 44px 10px 16px;text-align:center;font:15px/1.4 system-ui,sans-serif;background:" +
-      a.bg + ";color:" + a.fg);
+    var bottom = a.position === "bottom", r = a.radius || 0;
+    var edge = r ? "left:12px;right:12px;" + (bottom ? "bottom:12px" : "top:12px") : "left:0;right:0;" + (bottom ? "bottom:0" : "top:0");
+    var bar = el("div", "position:fixed;" + edge + ";z-index:2147483000;" + bannerCss(a));
     bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Announcement");
     bar.setAttribute("data-ot-ignore", "1");
     bar.appendChild(el("span", "", a.text));
-    var link = ctaLink(c, a, "margin-left:12px;color:" + a.fg + ";font-weight:600;text-decoration:underline");
+    var link = ctaLink(c, a, a.cta_bg
+      ? "display:inline-block;margin-left:12px;padding:4px 14px;border-radius:999px;text-decoration:none;font-weight:600;background:" + a.cta_bg + ";color:" + (a.cta_fg || "#ffffff")
+      : "margin-left:12px;color:" + (a.cta_fg || a.fg) + ";font-weight:600;text-decoration:underline");
     if (link) bar.appendChild(link);
-    var x = el("button", "position:absolute;right:10px;top:6px;background:none;border:0;color:" + a.fg + ";font-size:20px;cursor:pointer", "×");
-    x.setAttribute("aria-label", "Dismiss");
-    x.onclick = function () { bar.remove(); };
-    bar.appendChild(x);
+    if (a.closable !== false) {
+      var x = el("button", "position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:0;color:" + a.fg + ";font-size:20px;cursor:pointer", "×");
+      x.setAttribute("aria-label", "Dismiss");
+      x.onclick = function () { bar.remove(); };
+      bar.appendChild(x);
+    }
     document.body.appendChild(bar);
   }
   function showPopup(c, a) {
@@ -321,7 +333,7 @@
     box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true");
     if (a.title) box.appendChild(el("h2", "margin:0 0 8px;font-size:20px", a.title));
     if (a.text) box.appendChild(el("p", "margin:0 0 16px", a.text));
-    var link = ctaLink(c, a, "display:inline-block;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;background:" + a.bg + ";color:" + a.fg);
+    var link = ctaLink(c, a, "display:inline-block;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;background:" + (a.cta_bg || a.bg) + ";color:" + (a.cta_fg || a.fg));
     if (link) box.appendChild(link);
     var x = el("button", "position:absolute;right:10px;top:6px;background:none;border:0;font-size:22px;cursor:pointer;color:#555", "×");
     x.setAttribute("aria-label", "Close");

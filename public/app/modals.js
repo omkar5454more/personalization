@@ -336,6 +336,25 @@ ${safeJs}
 }catch(e){document.body.insertAdjacentHTML("beforeend","<pre style='color:#b42318;white-space:pre-wrap'>JavaScript error: "+String(e.message).replace(/</g,"&lt;")+"</pre>")}})(document.getElementById("${cid}"),{track:function(){},visitor:{}},{conversion:function(){},close:function(){},container:null});<\/script></body></html>`;
 }
 
+// Banner look, mirrored from public/sdk.js (bannerCss) so the live preview matches what visitors get. Keep in sync.
+const BANNER_PAD = { small: "6px", medium: "10px", large: "18px" };
+function bannerCss(a) {
+  const pv = BANNER_PAD[a.size] || BANNER_PAD.medium, fs = a.font_size || 15, r = a.radius || 0;
+  return `padding:${pv} ${a.closable === false ? "16px" : "44px"} ${pv} 16px;text-align:${a.align || "center"};font:${a.bold ? "700 " : ""}${fs}px/1.4 system-ui,sans-serif;background:${a.bg};color:${a.fg}${r ? ";border-radius:" + r + "px" : ""}`;
+}
+function bannerLiveHtml(a, type) {
+  const btn = a.cta_text ? (a.cta_bg
+    ? `<span style="display:inline-block;margin-left:12px;padding:4px 14px;border-radius:999px;font-weight:600;background:${esc(a.cta_bg)};color:${esc(a.cta_fg || "#ffffff")}">${esc(a.cta_text)}</span>`
+    : `<span style="margin-left:12px;font-weight:600;text-decoration:underline;color:${esc(a.cta_fg || a.fg)}">${esc(a.cta_text)}</span>`) : "";
+  if (type === "popup") {
+    return `<div style="background:rgba(0,0,0,.45);padding:18px;border-radius:8px"><div style="background:#fff;color:#111;max-width:340px;margin:0 auto;border-radius:12px;padding:20px;font:15px/1.5 system-ui,sans-serif;position:relative">
+      ${a.title ? `<div style="font-size:19px;font-weight:600;margin-bottom:6px">${esc(a.title)}</div>` : ""}${a.text ? `<div style="margin-bottom:12px">${esc(a.text)}</div>` : ""}
+      ${a.cta_text ? `<span style="display:inline-block;padding:9px 16px;border-radius:8px;font-weight:600;background:${esc(a.cta_bg || a.bg)};color:${esc(a.cta_fg || a.fg)}">${esc(a.cta_text)}</span>` : ""}
+      <span style="position:absolute;right:12px;top:6px;color:#666;font-size:20px">×</span></div></div>`;
+  }
+  return `<div style="position:relative;${bannerCss(a)};${a.radius ? "margin:0 12px" : ""}"><span>${esc(a.text || "Your message appears here")}</span>${btn}${a.closable === false ? "" : `<span style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-size:20px">×</span>`}</div>`;
+}
+
 function openNewCampaign(site, opts) { openCampaignModal(site, null, opts || {}); }
 
 async function openCampaignModal(site, existing, opts = {}) {
@@ -361,11 +380,27 @@ async function openCampaignModal(site, existing, opts = {}) {
     <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"]], type0, 'style="max-width:420px"')}</div>
 
     <div id="p-simple" style="display:none">
-      <div class="row" style="margin-bottom:8px">${sel("c-pos", [["top", "Banner at top"], ["bottom", "Banner at bottom"]], v("position", "top"), 'style="width:160px"')}
-        <label class="muted">Colour</label><input id="c-bg" type="color" value="${esc(v("bg", "#2a78d6"))}" aria-label="Background colour"><input id="c-fg" type="color" value="${esc(v("fg", "#ffffff"))}" aria-label="Text colour"></div>
-      <div class="field"><label for="c-title">Title (popup only)</label><input id="c-title" type="text" value="${esc(v("title"))}"></div>
+      <div class="lbl2" style="margin-bottom:4px">Live preview <span class="muted">(updates as you type)</span></div>
+      <div id="bn-live" style="border:1px dashed var(--border-strong);border-radius:8px;padding:12px;margin-bottom:12px;background:var(--surface-2)"></div>
       <div class="field"><label for="c-text">Message</label><input id="c-text" type="text" placeholder="Welcome back! Here's 10% off today." value="${esc(v("text"))}"></div>
-      <div class="row"><input id="c-cta" type="text" style="width:170px" placeholder="Button text" value="${esc(v("cta_text"))}"><input id="c-cta-url" type="text" class="grow" placeholder="/offer or https://…" value="${esc(v("cta_url"))}"></div>
+      <div class="field"><label for="c-title">Title (popup only)</label><input id="c-title" type="text" value="${esc(v("title"))}"></div>
+      <div class="row" style="margin-bottom:10px"><input id="c-cta" type="text" style="width:170px" placeholder="Button text (optional)" value="${esc(v("cta_text"))}"><input id="c-cta-url" type="text" class="grow" placeholder="/offer or https://…" value="${esc(v("cta_url"))}"></div>
+      <div class="lbl2" style="margin-bottom:6px">Design</div>
+      <div class="row" style="margin-bottom:8px">
+        ${sel("c-pos", [["top", "Banner at top"], ["bottom", "Banner at bottom"]], v("position", "top"), 'style="width:150px"')}
+        ${sel("c-align", [["center", "Text centered"], ["left", "Text left"], ["right", "Text right"]], v("align", "center"), 'style="width:140px"')}
+        ${sel("c-size", [["small", "Slim"], ["medium", "Normal"], ["large", "Tall"]], v("size", "medium"), 'style="width:100px"')}
+        <label class="muted">Text size</label><input id="c-fs" type="number" min="11" max="32" value="${esc(v("font_size", 15))}" style="width:70px">
+        <label class="muted">Corners</label><input id="c-radius" type="range" min="0" max="32" value="${esc(v("radius", 0))}" style="width:110px" aria-label="Corner roundness"></div>
+      <div class="row" style="margin-bottom:8px">
+        <label class="muted">Background</label><input id="c-bg" type="color" value="${esc(v("bg", "#2a78d6"))}" aria-label="Background colour">
+        <label class="muted">Text</label><input id="c-fg" type="color" value="${esc(v("fg", "#ffffff"))}" aria-label="Text colour">
+        <label class="switch" style="padding:0"><input type="checkbox" id="c-bold" ${v("bold", false) ? "checked" : ""}><span><div class="t">Bold</div></span></label>
+        <label class="switch" style="padding:0"><input type="checkbox" id="c-close" ${v("closable", true) ? "checked" : ""}><span><div class="t">Visitors can close it (×)</div></span></label></div>
+      <div class="row">
+        <label class="switch" style="padding:0"><input type="checkbox" id="c-ctab" ${v("cta_bg", "") ? "checked" : ""}><span><div class="t">Show the button as a filled button</div></span></label>
+        <label class="muted">Button</label><input id="c-ctabg" type="color" value="${esc(v("cta_bg", "#ffffff"))}" aria-label="Button colour">
+        <label class="muted">Button text</label><input id="c-ctafg" type="color" value="${esc(v("cta_fg", "#111111"))}" aria-label="Button text colour"></div>
     </div>
 
     <div id="p-custom" style="display:none">
@@ -413,6 +448,14 @@ async function openCampaignModal(site, existing, opts = {}) {
     { wide: true, footer: `<span class="muted" style="margin-right:auto">${existing ? "Changes go live within a minute for running campaigns." : "Saved as a draft — start it from the Personalization page."}</span><button class="btn" data-close>Cancel</button><button class="btn primary" id="c-save">${existing ? "Save changes" : "Create campaign"}</button>` });
   const el = m.el, g = id => $(id, el).value.trim();
   const audience = audiencePicker($("#c-audience", el), site, segments, cfg ? { segment_id: cfg.segment_id, rules: cfg.rules, match: cfg.match } : {});
+  const designOf = () => ({
+    text: g("#c-text"), title: g("#c-title"), cta_text: g("#c-cta"), cta_url: g("#c-cta-url"), position: g("#c-pos"), bg: $("#c-bg", el).value, fg: $("#c-fg", el).value,
+    font_size: Math.min(32, Math.max(11, parseInt($("#c-fs", el).value, 10) || 15)), align: g("#c-align"), size: g("#c-size"), radius: parseInt($("#c-radius", el).value, 10) || 0,
+    bold: $("#c-bold", el).checked, closable: $("#c-close", el).checked,
+    cta_bg: $("#c-ctab", el).checked ? $("#c-ctabg", el).value : "", cta_fg: $("#c-ctab", el).checked ? $("#c-ctafg", el).value : "",
+  });
+  const liveBanner = () => { const live = $("#bn-live", el); if (live) live.innerHTML = bannerLiveHtml(designOf(), g("#c-type")); };
+  $("#p-simple", el).addEventListener("input", liveBanner); $("#p-simple", el).addEventListener("change", liveBanner);
 
   const HELP = {
     html: "Your markup. <b>&lt;script&gt;</b> tags (including external ones like HubSpot's loader) are executed, in order.",
@@ -429,7 +472,8 @@ async function openCampaignModal(site, existing, opts = {}) {
     $("#p-simple", el).style.display = t === "custom" || t === "visual" ? "none" : "";
     $("#p-custom", el).style.display = t === "custom" ? "" : "none";
     $("#p-visual", el).style.display = t === "visual" ? "" : "none";
-    $("#c-pos", el).style.display = t === "banner" ? "" : "none";
+    ["#c-pos", "#c-align", "#c-size", "#c-fs", "#c-radius"].forEach(id => { $(id, el).style.display = t === "banner" ? "" : "none"; });
+    $$("#p-simple label.muted", el).forEach(l => { if (/Text size|Corners/.test(l.textContent)) l.style.display = t === "banner" ? "" : "none"; });
     $("#c-title", el).closest(".field").style.display = t === "popup" ? "" : "none";
   };
   const syncCustom = () => {
@@ -443,7 +487,8 @@ async function openCampaignModal(site, existing, opts = {}) {
   $("#c-freq", el).addEventListener("change", () => { freqTouched = true; });
   $("#c-type", el).addEventListener("change", () => { if (!freqTouched) $("#c-freq", el).value = $("#c-type", el).value === "visual" ? "always" : "once"; });
   $("#c-type", el).onchange = syncType; $("#c-display", el).onchange = syncCustom; $("#c-trigger", el).onchange = syncCustom;
-  syncType(); syncCustom(); showEd("html");
+  syncType(); syncCustom(); showEd("html"); liveBanner();
+  $("#c-type", el).addEventListener("change", liveBanner);
   $$("[data-ed]", el).forEach(b => b.onclick = () => showEd(b.dataset.ed));
   $$("textarea.code", el).forEach(ta => {
     let escaped = false;   // Esc then Tab leaves the editor, so keyboard users are never trapped
@@ -514,7 +559,7 @@ async function openCampaignModal(site, existing, opts = {}) {
       type, html: $("#ed-html", el).value, css: $("#ed-css", el).value, js: $("#ed-js", el).value,
       display: g("#c-display"), trigger: g("#c-trigger"), trigger_value: Math.max(0, parseInt($("#c-tv", el).value, 10) || 0),
       selector: g("#c-sel"), insert: g("#c-ins"),
-    } : { type, text: g("#c-text"), title: g("#c-title"), cta_text: g("#c-cta"), cta_url: g("#c-cta-url"), position: g("#c-pos"), bg: $("#c-bg", el).value, fg: $("#c-fg", el).value };
+    } : { type, ...designOf() };
     return { name: g("#c-name"), url_contains: g("#c-url"), ...common, frequency: g("#c-freq"), rules, actions: [action] };
   };
 

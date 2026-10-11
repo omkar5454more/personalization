@@ -53,6 +53,10 @@ async function visit(siteId, { attrs, queue, fn, ctxHtml = "<h1>Hello</h1><butto
   const campFree = await mk("FREE-BANNER", { rules: [{ field: "attr.plan", op: "eq", value: "free" }] });
   const campBuyer = await mk("BUYER-BANNER", { rules: [{ field: "did_event", op: "eq", value: "purchase" }] });
   const campCustomer = await mk("CUSTOMER-BANNER", { rules: [{ field: "customer", op: "eq", value: "true" }] });
+  const styled = (await api(`/api/sites/${site}/campaigns`, "POST", { name: "STYLED", frequency: "always", rules: [{ field: "attr.plan", op: "eq", value: "styled" }],
+    actions: [{ type: "banner", text: "STYLED-BANNER", position: "bottom", bg: "#112233", fg: "#eeeeee", font_size: 22, align: "left", size: "large", radius: 14, bold: true,
+      closable: false, cta_text: "Go", cta_url: "/offer", cta_bg: "#ff0000", cta_fg: "#ffffff" }] })).id;
+  await api(`/api/campaigns/${styled}/status`, "PATCH", { status: "running" });
 
   // 3-version test limited to the pro audience, plus a shipped-winner test
   const exp = (await api(`/api/sites/${site}/experiments`, "POST", { name: "Heading test", segment_id: seg, goal_id: signup, secondary_goal_ids: [buy],
@@ -82,6 +86,20 @@ async function visit(siteId, { attrs, queue, fn, ctxHtml = "<h1>Hello</h1><butto
   } });
   d1.window.close();
 
+  // ---- banner design options reach the visitor's page
+  console.log("-- visitor: styled banner");
+  const d4 = await visit(site, { queue: [["identify", { plan: "styled" }]], fn: async w => {
+    const bar = Array.from(w.document.body.children).find(n => n.textContent.includes("STYLED-BANNER"));
+    check("styled banner is rendered", !!bar);
+    const st = bar ? bar.style : {};
+    check("banner honours size, alignment, colours, bold, corners and bottom position",
+      bar && /22px/.test(st.font) && /700/.test(st.font) && st.textAlign === "left" && st.borderRadius === "14px" && st.bottom === "12px" && st.paddingTop === "18px" && /rgb\(17, 34, 51\)/.test(st.background), bar && bar.getAttribute("style"));
+    check("banner has no × when it is not closable", bar && bar.querySelectorAll("button").length === 0);
+    const cta = bar && bar.querySelector("a");
+    check("button is a filled pill when a button colour is set", cta && /rgb\(255, 0, 0\)/.test(cta.style.background) && cta.style.borderRadius === "999px");
+  } });
+  d4.window.close();
+
   // ---- the same browser profile cannot be reused (new jsdom = new storage); visitor 2: plan=free
   console.log("-- visitor: free");
   const d2 = await visit(site, { queue: [["identify", { plan: "free" }]], fn: async w => {
@@ -110,7 +128,7 @@ async function visit(siteId, { attrs, queue, fn, ctxHtml = "<h1>Hello</h1><butto
   check("signup counted once for the pro visitor (once-per-visitor goal)", G(signup).conversions === 1 && G(signup).converters === 1 && G(signup).value === 10, JSON.stringify(G(signup)));
   check("click goal with 'every' counted twice, value 5 each", G(buy).conversions === 2 && G(buy).value === 10, JSON.stringify(G(buy)));
   check("form goal fired from a submit event", G(form).conversions === 1, JSON.stringify(G(form)));
-  check("page goal fired on every visitor's first page (3 visitors)", G(page).conversions === 3, JSON.stringify(G(page)));
+  check("page goal fired on every visitor's first page (4 visitors)", G(page).conversions === 4, JSON.stringify(G(page)));
   const infl = G(signup).influenced_by.find(a => a.id === campPro);
   check("goal report credits the PRO campaign (signup after being shown)", infl && infl.converted === 1 && infl.exposed === 1, JSON.stringify(G(signup).influenced_by));
   const res = await api(`/api/experiments/${exp}/results`);

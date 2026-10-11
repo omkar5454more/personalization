@@ -43,7 +43,7 @@ Vercel functions have no persistent disk, so production uses **Turso** (hosted S
 Notes
 - Vercel **Hobby is for personal, non-commercial use**; client work or a company product needs Pro.
 - Static files (dashboard, `sdk.js`, ...) come from the CDN and don't count as function calls. Each visitor page view costs
-  roughly one `/collect` call; `/sdk/<id>.json` is cached for 60 s at the CDN. Check Vercel's and Turso's current free limits.
+  roughly one `/collect` call; `/sdk/<id>.json` is cached for about 20 s at the CDN (dashboard changes show on the site within ~half a minute); `sdk.js` itself for about 5 minutes. Check Vercel's and Turso's current free limits.
 - Cookies are `Secure` automatically on Vercel. Geo rules (`country`) work on Vercel (it sends `x-vercel-ip-country`).
 - Functions run for at most 30 s (`vercel.json`); funnels scan at most 150k events per request.
 

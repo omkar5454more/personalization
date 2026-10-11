@@ -239,3 +239,25 @@ def test_other_users_cannot_touch_segments_or_goals(client, site):
         assert other.get(f"/api/sites/{site}/segments").status_code == 404
         assert other.post(f"/api/sites/{site}/goals", json={"name": "x", "type": "event", "event_name": "x"}).status_code == 404
         assert other.get(f"/api/sites/{site}/goals/report").status_code == 404
+
+
+# ------------------------------------------------------------------ banner design
+def test_banner_design_fields_are_saved_and_validated(client, site):
+    design = {"type": "banner", "text": "Sale", "bg": "#112233", "fg": "#ffffff", "font_size": 20, "align": "left", "size": "large",
+              "radius": 12, "bold": True, "closable": False, "cta_text": "Go", "cta_url": "/offer", "cta_bg": "#ff0000", "cta_fg": "#ffffff"}
+    cid = client.post(f"/api/sites/{site}/campaigns", json={"name": "Designed", "actions": [design]}).json()["id"]
+    client.patch(f"/api/campaigns/{cid}/status", json={"status": "running"})
+    a = next(c for c in client.get(f"/sdk/{site}.json").json()["campaigns"] if c["id"] == cid)["actions"][0]
+    assert (a["font_size"], a["align"], a["size"], a["radius"], a["bold"], a["closable"], a["cta_bg"]) == (20, "left", "large", 12, True, False, "#ff0000")
+    for bad in ({"align": "justify"}, {"size": "huge"}, {"font_size": 99}, {"radius": -1}, {"cta_bg": "red"}, {"cta_fg": "#12"}):
+        r = client.post(f"/api/sites/{site}/campaigns", json={"name": "bad", "actions": [{**design, **bad}]})
+        assert r.status_code == 422, (bad, r.status_code)
+    # old campaigns (saved before these fields existed) still load with the original look
+    old = client.post(f"/api/sites/{site}/campaigns", json={"name": "Old", "actions": [{"type": "banner", "text": "hi"}]}).json()["id"]
+    a = next(c for c in client.get(f"/api/sites/{site}/campaigns").json() if c["id"] == old)["config"]["actions"][0]
+    assert (a["font_size"], a["align"], a["size"], a["radius"], a["closable"], a["cta_bg"]) == (15, "center", "medium", 0, True, "")
+
+
+def test_sdk_config_cache_is_short(client, site):
+    cc = client.get(f"/sdk/{site}.json").headers["cache-control"]
+    assert "s-maxage=20" in cc

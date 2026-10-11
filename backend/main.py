@@ -674,6 +674,15 @@ class Action(BaseModel):
     position: str = "top"   # banner: top | bottom
     bg: str = "#4f46e5"
     fg: str = "#ffffff"
+    # banner / popup look (all optional; the defaults reproduce the original design)
+    font_size: int = Field(default=15, ge=11, le=32)
+    align: str = "center"       # left | center | right
+    size: str = "medium"        # small | medium | large  (inner spacing)
+    radius: int = Field(default=0, ge=0, le=32)
+    bold: bool = False
+    closable: bool = True       # show the × button
+    cta_bg: str = ""            # button colours; empty = plain underlined link (banner) / accent button (popup)
+    cta_fg: str = ""
     selector: str = ""      # change, or the target element for custom/inline
     action: str = "text"    # change: text | html | css | attr | hide
     value: str = Field(default="", max_length=20000)
@@ -734,6 +743,11 @@ def validate_campaign(c: CampaignIn):
         for col in (a.bg, a.fg):
             if not re.fullmatch(r"#[0-9a-fA-F]{3,8}", col):
                 raise HTTPException(422, "colours must be hex like #4f46e5")
+        for col in (a.cta_bg, a.cta_fg):
+            if col and not re.fullmatch(r"#[0-9a-fA-F]{3,8}", col):
+                raise HTTPException(422, "button colours must be hex like #4f46e5")
+        if a.align not in {"left", "center", "right"} or a.size not in {"small", "medium", "large"}:
+            raise HTTPException(422, "align must be left/center/right and size small/medium/large")
 
 
 @app.get("/api/sites/{site_id}/campaigns")
@@ -835,9 +849,10 @@ def sdk_config(site_id: str):
         cfg["id"] = r["id"]
         camps.append(with_audience(cfg))
     goals = [{k: g[k] for k in ("id", "type", "selector", "url_contains", "event_name", "form_name", "value", "count_mode")} for g in grows]
-    # Cached 60s at the CDN (s-maxage) so a busy site doesn't hit the function/database on every pageview.
+    # Cached ~20s at the CDN (s-maxage) so a busy site doesn't hit the function/database on every pageview,
+    # yet dashboard changes show up on the site within about half a minute.
     return JSONResponse({"site": site_id, "settings": site_settings(site_row), "experiments": exps, "campaigns": camps, "goals": goals},
-                        headers={"Cache-Control": "public, max-age=60, s-maxage=60, stale-while-revalidate=300"})
+                        headers={"Cache-Control": "public, max-age=15, s-maxage=20, stale-while-revalidate=60"})
 
 
 MAX_BATCH = 50
