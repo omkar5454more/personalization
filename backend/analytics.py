@@ -12,11 +12,27 @@ import time
 from collections import defaultdict
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+
+from backend import perf
 from pydantic import BaseModel, Field
 
 # URL without its query string, so /pricing?a=1 and /pricing?b=2 are one page.
 PATH = "(CASE WHEN instr(url,'?')>0 THEN substr(url,1,instr(url,'?')-1) ELSE url END)"
+
+
+def _browser_cache(response: Response, seconds: int = 20) -> None:
+    """Heavy read-only reports may be reused by the browser for a few seconds (flipping between tabs feels instant)."""
+    response.headers["Cache-Control"] = f"private, max-age={seconds}, stale-while-revalidate=60"
+
+
+def _memo(response: Response, key, compute):
+    """Server-side memo (~30 s per warm instance) for the heavy aggregate reads; the key always contains the user id."""
+    _browser_cache(response)
+    hit = perf.analytics.get(key)
+    if hit is not None:
+        return hit
+    return perf.analytics.set(key, compute())
 
 
 def _since(days: int) -> float:
@@ -66,40 +82,38 @@ def build_router(db, current_user, owned_site) -> APIRouter:
     r = APIRouter(prefix="/api/sites/{site_id}")
 
     @r.get("/overview")
-    def overview(site_id: str, days: int = 14, user=Depends(current_user)):
+    def overview(site_id: str, response: Response, days: int = 14, user=Depends(current_user)):
+        return _memo(response, ("overview", user["id"], site_id, days), lambda: _overview(site_id, days, user))
+
+    def _overview(site_id, days, user):
         since = _since(days)
         with db() as con:
             owned_site(con, site_id, user)
-            q = lambda sql, *a: con.execute(sql, a).fetchall()
-            tot = q(
-                "SELECT COUNT(DISTINCT visitor_id) v, COUNT(DISTINCT session_id) s, COUNT(*) pv, "
-                "COUNT(DISTINCT CASE WHEN is_returning=0 THEN visitor_id END) new_v, "
-                "COUNT(DISTINCT CASE WHEN is_returning=1 THEN visitor_id END) ret_v "
-                "FROM events WHERE site_id=? AND type='pageview' AND ts>=?", site_id, since)[0]
-            eng = q(
-                "SELECT AVG(s) avg_s, AVG(sc) avg_sc FROM ("
-                " SELECT MAX(json_extract(props,'$.seconds')) s, MAX(json_extract(props,'$.scroll')) sc "
-                " FROM events WHERE site_id=? AND type='engage' AND ts>=? GROUP BY json_extract(props,'$.pid'))",
-                site_id, since)[0]
-            daily = q(
-                "SELECT date(ts,'unixepoch') d, "
-                "COUNT(DISTINCT CASE WHEN is_returning=0 THEN visitor_id END) new_v, "
-                "COUNT(DISTINCT CASE WHEN is_returning=1 THEN visitor_id END) ret_v, COUNT(*) pageviews "
-                "FROM events WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY d ORDER BY d", site_id, since)
-            sources = q(
-                "SELECT COALESCE(NULLIF(json_extract(props,'$.utm_source'),''), NULLIF(json_extract(props,'$.ref'),''), 'direct') src, "
-                "COUNT(DISTINCT visitor_id) v FROM events WHERE site_id=? AND type='pageview' AND ts>=? "
-                "GROUP BY src ORDER BY v DESC LIMIT 8", site_id, since)
-            devices = q(
-                "SELECT COALESCE(json_extract(props,'$.device'),'unknown') d, COUNT(DISTINCT visitor_id) v "
-                "FROM events WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY d ORDER BY v DESC", site_id, since)
-            countries = q(
-                "SELECT json_extract(props,'$.country') c, COUNT(DISTINCT visitor_id) v FROM events "
-                "WHERE site_id=? AND type='pageview' AND ts>=? AND json_extract(props,'$.country') IS NOT NULL "
-                "GROUP BY c ORDER BY v DESC LIMIT 8", site_id, since)
-            top_events = q(
-                "SELECT name, COUNT(*) n, COUNT(DISTINCT visitor_id) v FROM events "
-                "WHERE site_id=? AND type='event' AND ts>=? GROUP BY name ORDER BY n DESC LIMIT 8", site_id, since)
+            tot_c, eng_c, daily_c, src_c, dev_c, ctry_c, ev_c = con.multi([
+                ("SELECT COUNT(DISTINCT visitor_id) v, COUNT(DISTINCT session_id) s, COUNT(*) pv, "
+                 "COUNT(DISTINCT CASE WHEN is_returning=0 THEN visitor_id END) new_v, "
+                 "COUNT(DISTINCT CASE WHEN is_returning=1 THEN visitor_id END) ret_v "
+                 "FROM events WHERE site_id=? AND type='pageview' AND ts>=?", (site_id, since)),
+                ("SELECT AVG(s) avg_s, AVG(sc) avg_sc FROM ("
+                 " SELECT MAX(json_extract(props,'$.seconds')) s, MAX(json_extract(props,'$.scroll')) sc "
+                 " FROM events WHERE site_id=? AND type='engage' AND ts>=? GROUP BY json_extract(props,'$.pid'))", (site_id, since)),
+                ("SELECT date(ts,'unixepoch') d, "
+                 "COUNT(DISTINCT CASE WHEN is_returning=0 THEN visitor_id END) new_v, "
+                 "COUNT(DISTINCT CASE WHEN is_returning=1 THEN visitor_id END) ret_v, COUNT(*) pageviews "
+                 "FROM events WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY d ORDER BY d", (site_id, since)),
+                ("SELECT COALESCE(NULLIF(json_extract(props,'$.utm_source'),''), NULLIF(json_extract(props,'$.ref'),''), 'direct') src, "
+                 "COUNT(DISTINCT visitor_id) v FROM events WHERE site_id=? AND type='pageview' AND ts>=? "
+                 "GROUP BY src ORDER BY v DESC LIMIT 8", (site_id, since)),
+                ("SELECT COALESCE(json_extract(props,'$.device'),'unknown') d, COUNT(DISTINCT visitor_id) v "
+                 "FROM events WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY d ORDER BY v DESC", (site_id, since)),
+                ("SELECT json_extract(props,'$.country') c, COUNT(DISTINCT visitor_id) v FROM events "
+                 "WHERE site_id=? AND type='pageview' AND ts>=? AND json_extract(props,'$.country') IS NOT NULL "
+                 "GROUP BY c ORDER BY v DESC LIMIT 8", (site_id, since)),
+                ("SELECT name, COUNT(*) n, COUNT(DISTINCT visitor_id) v FROM events "
+                 "WHERE site_id=? AND type='event' AND ts>=? GROUP BY name ORDER BY n DESC LIMIT 8", (site_id, since)),
+            ])
+            tot, eng = tot_c.fetchone(), eng_c.fetchone()
+            daily, sources, devices, countries, top_events = daily_c.fetchall(), src_c.fetchall(), dev_c.fetchall(), ctry_c.fetchall(), ev_c.fetchall()
         return {
             "days": days,
             "visitors": tot["v"], "sessions": tot["s"], "pageviews": tot["pv"],
@@ -113,60 +127,66 @@ def build_router(db, current_user, owned_site) -> APIRouter:
         }
 
     @r.get("/pages")
-    def pages(site_id: str, days: int = 14, user=Depends(current_user)):
+    def pages(site_id: str, response: Response, days: int = 14, user=Depends(current_user)):
+        return _memo(response, ("pages", user["id"], site_id, days), lambda: _pages(site_id, days, user))
+
+    def _pages(site_id, days, user):
         since = _since(days)
         with db() as con:
             owned_site(con, site_id, user)
-            views = con.execute(
-                f"SELECT {PATH} p, COUNT(*) views, COUNT(DISTINCT visitor_id) visitors FROM events "
-                "WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY p ORDER BY views DESC LIMIT 100",
-                (site_id, since)).fetchall()
-            eng = {x["p"]: x for x in con.execute(
-                f"SELECT {PATH} p, AVG(s) avg_s, AVG(sc) avg_sc FROM ("
-                " SELECT url, MAX(json_extract(props,'$.seconds')) s, MAX(json_extract(props,'$.scroll')) sc "
-                " FROM events WHERE site_id=? AND type='engage' AND ts>=? GROUP BY json_extract(props,'$.pid')) GROUP BY p",
-                (site_id, since))}
-            clicks = {x["p"]: x["n"] for x in con.execute(
-                f"SELECT {PATH} p, COUNT(*) n FROM events WHERE site_id=? AND type='autoclick' AND ts>=? GROUP BY p",
-                (site_id, since))}
+            v_c, e_c, c_c = con.multi([
+                (f"SELECT {PATH} p, COUNT(*) views, COUNT(DISTINCT visitor_id) visitors FROM events "
+                 "WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY p ORDER BY views DESC LIMIT 100", (site_id, since)),
+                (f"SELECT {PATH} p, AVG(s) avg_s, AVG(sc) avg_sc FROM ("
+                 " SELECT url, MAX(json_extract(props,'$.seconds')) s, MAX(json_extract(props,'$.scroll')) sc "
+                 " FROM events WHERE site_id=? AND type='engage' AND ts>=? GROUP BY json_extract(props,'$.pid')) GROUP BY p", (site_id, since)),
+                (f"SELECT {PATH} p, COUNT(*) n FROM events WHERE site_id=? AND type='autoclick' AND ts>=? GROUP BY p", (site_id, since)),
+            ])
+            views, eng, clicks = v_c.fetchall(), {x["p"]: x for x in e_c.fetchall()}, {x["p"]: x["n"] for x in c_c.fetchall()}
         return [{"path": v["p"], "views": v["views"], "visitors": v["visitors"],
                  "avg_seconds": eng[v["p"]]["avg_s"] if v["p"] in eng else None,
                  "avg_scroll": eng[v["p"]]["avg_sc"] if v["p"] in eng else None,
                  "clicks": clicks.get(v["p"], 0)} for v in views]
 
     @r.get("/clicks")
-    def clicks(site_id: str, days: int = 14, path: str = "", user=Depends(current_user)):
+    def clicks(site_id: str, response: Response, days: int = 14, path: str = "", user=Depends(current_user)):
+        return _memo(response, ("clicks", user["id"], site_id, days, path), lambda: _clicks(site_id, days, path, user))
+
+    def _clicks(site_id, days, path, user):
         since = _since(days)
         extra, args = (f" AND {PATH}=?", [path]) if path else ("", [])
         with db() as con:
             owned_site(con, site_id, user)
-            rows = con.execute(
-                "SELECT MAX(json_extract(props,'$.sel')) sel, MAX(json_extract(props,'$.text')) text, "
-                "MAX(json_extract(props,'$.tag')) tag, MAX(json_extract(props,'$.href')) href, "
-                "MAX(json_extract(props,'$.outbound')) outbound, MAX(json_extract(props,'$.download')) download, "
-                "COUNT(*) n, COUNT(DISTINCT visitor_id) v FROM events "
-                f"WHERE site_id=? AND type='autoclick' AND ts>=?{extra} "
-                "GROUP BY json_extract(props,'$.key') ORDER BY n DESC LIMIT 50",
-                [site_id, since] + args).fetchall()
-            rage = con.execute(
-                "SELECT MAX(json_extract(props,'$.sel')) sel, MAX(json_extract(props,'$.text')) text, COUNT(*) n, "
-                "COUNT(DISTINCT visitor_id) v FROM events "
-                f"WHERE site_id=? AND type='rage' AND ts>=?{extra} "
-                "GROUP BY json_extract(props,'$.key') ORDER BY n DESC LIMIT 20",
-                [site_id, since] + args).fetchall()
+            rows_c, rage_c = con.multi([
+                ("SELECT MAX(json_extract(props,'$.sel')) sel, MAX(json_extract(props,'$.text')) text, "
+                 "MAX(json_extract(props,'$.tag')) tag, MAX(json_extract(props,'$.href')) href, "
+                 "MAX(json_extract(props,'$.outbound')) outbound, MAX(json_extract(props,'$.download')) download, "
+                 "COUNT(*) n, COUNT(DISTINCT visitor_id) v FROM events "
+                 f"WHERE site_id=? AND type='autoclick' AND ts>=?{extra} "
+                 "GROUP BY json_extract(props,'$.key') ORDER BY n DESC LIMIT 50", [site_id, since] + args),
+                ("SELECT MAX(json_extract(props,'$.sel')) sel, MAX(json_extract(props,'$.text')) text, COUNT(*) n, "
+                 "COUNT(DISTINCT visitor_id) v FROM events "
+                 f"WHERE site_id=? AND type='rage' AND ts>=?{extra} "
+                 "GROUP BY json_extract(props,'$.key') ORDER BY n DESC LIMIT 20", [site_id, since] + args),
+            ])
+            rows, rage = rows_c.fetchall(), rage_c.fetchall()
         return {"clicks": [dict(x) for x in rows], "rage": [dict(x) for x in rage]}
 
     @r.get("/scroll")
-    def scroll(site_id: str, days: int = 14, user=Depends(current_user)):
+    def scroll(site_id: str, response: Response, days: int = 14, user=Depends(current_user)):
+        return _memo(response, ("scroll", user["id"], site_id, days), lambda: _scroll(site_id, days, user))
+
+    def _scroll(site_id, days, user):
         since = _since(days)
         with db() as con:
             owned_site(con, site_id, user)
-            totals = {x["p"]: x["n"] for x in con.execute(
-                f"SELECT {PATH} p, COUNT(DISTINCT json_extract(props,'$.pid')) n FROM events "
-                "WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY p", (site_id, since))}
-            reach = con.execute(
-                f"SELECT {PATH} p, json_extract(props,'$.depth') d, COUNT(DISTINCT json_extract(props,'$.pid')) n FROM events "
-                "WHERE site_id=? AND type='scroll' AND ts>=? GROUP BY p, d", (site_id, since)).fetchall()
+            t_c, r_c = con.multi([
+                (f"SELECT {PATH} p, COUNT(DISTINCT json_extract(props,'$.pid')) n FROM events "
+                 "WHERE site_id=? AND type='pageview' AND ts>=? GROUP BY p", (site_id, since)),
+                (f"SELECT {PATH} p, json_extract(props,'$.depth') d, COUNT(DISTINCT json_extract(props,'$.pid')) n FROM events "
+                 "WHERE site_id=? AND type='scroll' AND ts>=? GROUP BY p, d", (site_id, since)),
+            ])
+            totals, reach = {x["p"]: x["n"] for x in t_c.fetchall()}, r_c.fetchall()
         out = {}
         for x in reach:
             out.setdefault(x["p"], {})[int(x["d"])] = x["n"]
@@ -180,7 +200,8 @@ def build_router(db, current_user, owned_site) -> APIRouter:
         return res
 
     @r.get("/forms")
-    def forms(site_id: str, days: int = 14, user=Depends(current_user)):
+    def forms(site_id: str, response: Response, days: int = 14, user=Depends(current_user)):
+        _browser_cache(response)
         since = _since(days)
         with db() as con:
             owned_site(con, site_id, user)
@@ -220,40 +241,43 @@ def build_router(db, current_user, owned_site) -> APIRouter:
                  "props": json.loads(x["props"] or "{}")} for x in rows][::-1]
 
     @r.get("/live")
-    def live(site_id: str, user=Depends(current_user)):
+    def live(site_id: str, response: Response, user=Depends(current_user)):
+        response.headers["Cache-Control"] = "no-store"
         with db() as con:
             owned_site(con, site_id, user)
-            rows = con.execute(
-                "SELECT ts, visitor_id, type, name, url, exp_id, variant, props FROM events "
-                "WHERE site_id=? ORDER BY id DESC LIMIT 80", (site_id,)).fetchall()
-            active = con.execute(
-                "SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND ts>=?",
-                (site_id, time.time() - 300)).fetchone()["n"]
+            rows_c, act_c = con.multi([
+                ("SELECT ts, visitor_id, type, name, url, exp_id, variant, props FROM events "
+                 "WHERE site_id=? ORDER BY id DESC LIMIT 80", (site_id,)),
+                ("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND ts>=?", (site_id, time.time() - 300)),
+            ])
+            rows, active = rows_c.fetchall(), act_c.fetchone()["n"]
         return {"active_now": active,
                 "events": [{**{k: x[k] for k in ("ts", "visitor_id", "type", "name", "url", "exp_id", "variant")},
                             "props": json.loads(x["props"] or "{}")} for x in rows]}
 
     # ------------------------------------------------------------------ heatmaps
     @r.get("/heatmap")
-    def heatmap(site_id: str, path: str, days: int = 14, device: str = "", user=Depends(current_user)):
+    def heatmap(site_id: str, path: str, response: Response, days: int = 14, device: str = "", user=Depends(current_user)):
+        return _memo(response, ("heatmap", user["id"], site_id, path, days, device), lambda: _heatmap(site_id, path, days, device, user))
+
+    def _heatmap(site_id, path, days, device, user):
         """Click density bins + scroll-reach curve for one page. Bins are 2% of page width x 25px tall."""
         since = _since(days)
         dev_sql, dev_args = (" AND json_extract(props,'$.device')=?", [device]) if device in {"desktop", "tablet", "mobile"} else ("", [])
         with db() as con:
             owned_site(con, site_id, user)
             base = [site_id, since, path] + dev_args
-            bins = con.execute(
-                "SELECT CAST(json_extract(props,'$.x')/2 AS INTEGER) bx, CAST(json_extract(props,'$.y')/25 AS INTEGER) by_, COUNT(*) n "
-                f"FROM events WHERE site_id=? AND type='autoclick' AND ts>=? AND {PATH}=? AND json_extract(props,'$.x') IS NOT NULL{dev_sql} "
-                "GROUP BY bx, by_ ORDER BY n DESC LIMIT 4000", base).fetchall()
-            dims = con.execute(
-                "SELECT AVG(json_extract(props,'$.dw')) dw, AVG(json_extract(props,'$.dh')) dh, MAX(json_extract(props,'$.y')) maxy, COUNT(*) n "
-                f"FROM events WHERE site_id=? AND type='autoclick' AND ts>=? AND {PATH}=? AND json_extract(props,'$.x') IS NOT NULL{dev_sql}", base).fetchone()
-            pvs = con.execute(
-                f"SELECT COUNT(*) n FROM events WHERE site_id=? AND type='pageview' AND ts>=? AND {PATH}=?{dev_sql}", base).fetchone()["n"]
-            eng = con.execute(
-                "SELECT MAX(json_extract(props,'$.scroll')) sc, MAX(json_extract(props,'$.vh')) vh FROM events "
-                f"WHERE site_id=? AND type='engage' AND ts>=? AND {PATH}=?{dev_sql} GROUP BY json_extract(props,'$.pid')", base).fetchall()
+            bins_c, dims_c, pv_c, eng_c = con.multi([
+                ("SELECT CAST(json_extract(props,'$.x')/2 AS INTEGER) bx, CAST(json_extract(props,'$.y')/25 AS INTEGER) by_, COUNT(*) n "
+                 f"FROM events WHERE site_id=? AND type='autoclick' AND ts>=? AND {PATH}=? AND json_extract(props,'$.x') IS NOT NULL{dev_sql} "
+                 "GROUP BY bx, by_ ORDER BY n DESC LIMIT 4000", base),
+                ("SELECT AVG(json_extract(props,'$.dw')) dw, AVG(json_extract(props,'$.dh')) dh, MAX(json_extract(props,'$.y')) maxy, COUNT(*) n "
+                 f"FROM events WHERE site_id=? AND type='autoclick' AND ts>=? AND {PATH}=? AND json_extract(props,'$.x') IS NOT NULL{dev_sql}", base),
+                (f"SELECT COUNT(*) n FROM events WHERE site_id=? AND type='pageview' AND ts>=? AND {PATH}=?{dev_sql}", base),
+                ("SELECT MAX(json_extract(props,'$.scroll')) sc, MAX(json_extract(props,'$.vh')) vh FROM events "
+                 f"WHERE site_id=? AND type='engage' AND ts>=? AND {PATH}=?{dev_sql} GROUP BY json_extract(props,'$.pid')", base),
+            ])
+            bins, dims, pvs, eng = bins_c.fetchall(), dims_c.fetchone(), pv_c.fetchone()["n"], eng_c.fetchall()
         scrolls = [x["sc"] for x in eng if x["sc"] is not None]
         vhs = [x["vh"] for x in eng if x["vh"]]
         curve = [{"depth": d, "share": (sum(1 for v in scrolls if v >= d) / len(scrolls)) if scrolls else 0.0} for d in range(0, 101, 5)]
@@ -298,7 +322,10 @@ def build_router(db, current_user, owned_site) -> APIRouter:
         return {"ok": True}
 
     @r.get("/funnels/{fid}/results")
-    def funnel_results(site_id: str, fid: str, days: int = 14, user=Depends(current_user)):
+    def funnel_results(site_id: str, fid: str, response: Response, days: int = 14, user=Depends(current_user)):
+        return _memo(response, ("funnel", user["id"], site_id, fid, days), lambda: _funnel_results(site_id, fid, days, user))
+
+    def _funnel_results(site_id, fid, days, user):
         """Ordered funnel: a visitor counts at step N only after completing steps 1..N-1 in order."""
         since = _since(days)
         with db() as con:

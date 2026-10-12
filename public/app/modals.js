@@ -84,7 +84,7 @@ function sampleSize(baseline, relLift) {
 const VERSION_LETTERS = "BCDEF";
 
 async function openNewExperiment(site) {
-  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`, { cache: 20000 }).catch(() => []), api(`/api/sites/${site.id}/goals`, { cache: 20000 }).catch(() => [])]);
   const saved = goals.filter(g => !g.archived);
   EDITOR.siteId = site.id;
   let lastUrl = "";
@@ -358,7 +358,7 @@ function bannerLiveHtml(a, type) {
 function openNewCampaign(site, opts) { openCampaignModal(site, null, opts || {}); }
 
 async function openCampaignModal(site, existing, opts = {}) {
-  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`, { cache: 20000 }).catch(() => []), api(`/api/sites/${site.id}/goals`, { cache: 20000 }).catch(() => [])]);
   const cfg = existing ? existing.config : null;
   const act = cfg ? cfg.actions[0] : null;
   const sel = (id, opts, cur, extra = "") => `<select id="${id}" ${extra}>${opts.map(([k, l]) => `<option value="${k}" ${String(cur) === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
@@ -378,7 +378,16 @@ async function openCampaignModal(site, existing, opts = {}) {
     <div class="row" style="margin-bottom:6px"><span class="lbl2">When it shows</span>
       ${sel("c-trig", [["load", "On each page view"], ["session_start", "When a visit starts (first page of a visit)"], ["delay", "After some time on the page"], ["scroll", "When they scroll down the page"], ["exit", "When they're about to leave (computers)"], ["click", "When they click an element"], ["form", "When they submit a form"], ["event", "When the site sends an event"]], cfg ? (cfg.trigger_type || "load") : "load", 'style="width:310px"')}
       <input id="c-trigv" type="text" style="width:240px" value="${esc(cfg ? (cfg.trigger_value || "") : "")}"><span class="muted" id="c-trigh" style="font-size:12.5px"></span></div>
-    <div class="muted" style="font-size:12.5px;margin-bottom:14px">“Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
+    <div class="muted" style="font-size:12.5px;margin-bottom:8px">“Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
+    <details class="adv" style="margin-bottom:14px" ${cfg && (cfg.start_at || cfg.end_at || cfg.max_views || cfg.cooldown_hours || cfg.holdout_pct || cfg.priority) ? "open" : ""}>
+      <summary><b>Schedule, limits &amp; control group</b> <span class="muted">(optional)</span></summary>
+      <div class="row" style="margin:10px 0 8px"><span class="lbl2">Run from</span><input id="c-start" type="datetime-local" style="width:210px" value="${esc(toLocalInput(cfg && cfg.start_at))}">
+        <span class="lbl2">until</span><input id="c-end" type="datetime-local" style="width:210px" value="${esc(toLocalInput(cfg && cfg.end_at))}"><span class="muted" style="font-size:12.5px">your local time; blank = no limit</span></div>
+      <div class="row" style="margin-bottom:8px"><span class="lbl2">Show at most</span><input id="c-maxv" type="number" min="0" max="1000" style="width:80px" value="${cfg && cfg.max_views ? cfg.max_views : 0}"><span class="muted">times per visitor (0 = no limit)</span>
+        <span class="lbl2">wait</span><input id="c-cool" type="number" min="0" style="width:80px" value="${cfg && cfg.cooldown_hours ? cfg.cooldown_hours : 0}"><span class="muted">hours between showings</span></div>
+      <div class="row" style="margin-bottom:8px"><span class="lbl2">Priority</span><input id="c-prio" type="number" min="0" max="100" style="width:80px" value="${cfg && cfg.priority ? cfg.priority : 0}"><span class="muted">higher wins when several banners/popups compete for a page (turn on “one overlay at a time” in Install &amp; settings)</span></div>
+      <div class="row"><span class="lbl2">Control group</span><input id="c-hold" type="number" min="0" max="50" style="width:80px" value="${cfg && cfg.holdout_pct ? cfg.holdout_pct : 0}"><span class="muted">% of matching visitors who are deliberately NOT shown this, to measure its real effect. Needs a conversion goal below.</span></div>
+    </details>
 
     <div class="lbl2" style="margin-bottom:6px">2 · What should they see?</div>
     <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"], ["redirect", "Redirect — send them to another page"]], type0, 'style="max-width:420px"')}</div>
@@ -566,6 +575,9 @@ async function openCampaignModal(site, existing, opts = {}) {
 
   const buildBody = () => {
     const aud = audience.get(), rules = aud.rules, common = { match: aud.match, segment_id: aud.segment_id, goal_id: g("#c-goal"),
+      start_at: fromLocalInput(g("#c-start")), end_at: fromLocalInput(g("#c-end")),
+      max_views: Math.max(0, parseInt(g("#c-maxv"), 10) || 0), cooldown_hours: Math.max(0, parseInt(g("#c-cool"), 10) || 0),
+      priority: Math.max(0, parseInt(g("#c-prio"), 10) || 0), holdout_pct: Math.max(0, parseInt(g("#c-hold"), 10) || 0),
       page_match: g("#c-pagematch"), trigger_type: g("#c-trig"), trigger_value: g("#c-trig") === "load" || g("#c-trig") === "exit" || g("#c-trig") === "session_start" ? "" : g("#c-trigv") };
     const type = g("#c-type");
     if (type === "redirect") {
@@ -750,4 +762,17 @@ async function createDemoSite(btn) {
     $("#demo-go", m.el).onclick = () => { m.close(); location.hash = `#/site/${d.id}/overview`; };
   } catch (e) { toast(e.message, true); }
   finally { btn.disabled = false; btn.textContent = label; }
+}
+
+
+// datetime-local <-> ISO (UTC) helpers for campaign / test schedules
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso); if (isNaN(d)) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fromLocalInput(v) {
+  if (!v) return "";
+  const d = new Date(v); return isNaN(d) ? "" : d.toISOString().replace(/\.\d+Z$/, "Z");
 }

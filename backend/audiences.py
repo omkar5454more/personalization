@@ -75,11 +75,16 @@ def build_router(db, current_user, owned_site, new_id) -> APIRouter:
     def list_segments(site_id: str, user=Depends(current_user)):
         with db() as con:
             owned_site(con, site_id, user)
-            rows = con.execute("SELECT * FROM segments WHERE site_id=? ORDER BY created", (site_id,)).fetchall()
+            seg_c, camp_c, exp_c = con.multi([
+                ("SELECT * FROM segments WHERE site_id=? ORDER BY created", (site_id,)),
+                ("SELECT config FROM campaigns WHERE site_id=?", (site_id,)),
+                ("SELECT config FROM experiments WHERE site_id=?", (site_id,)),
+            ])
+            rows = seg_c.fetchall()
             # how many campaigns / tests use each segment, so deleting one is an informed decision
             use = defaultdict(int)
-            for tbl in ("campaigns", "experiments"):
-                for c in con.execute(f"SELECT config FROM {tbl} WHERE site_id=?", (site_id,)).fetchall():
+            for cur in (camp_c, exp_c):
+                for c in cur.fetchall():
                     sid = (json.loads(c["config"]) or {}).get("segment_id")
                     if sid:
                         use[sid] += 1
@@ -176,28 +181,44 @@ def build_router(db, current_user, owned_site, new_id) -> APIRouter:
 
     @r.get("/goals/report")
     def goals_report(site_id: str, days: int = 30, user=Depends(current_user)):
+        return _goals_report(site_id, days, user)
+
+    @r.get("/goals/report.csv")
+    def goals_report_csv(site_id: str, days: int = 30, user=Depends(current_user)):
+        from fastapi.responses import Response
+        import csv, io
+        rep = _goals_report(site_id, days, user)
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["goal", "type", "conversions", "people", "rate", "value", "once_or_every"])
+        for g in rep["goals"]:
+            name = ("'" + g["name"]) if g["name"][:1] in ("=", "+", "-", "@") else g["name"]
+            w.writerow([name, g["type"], g["conversions"], g["converters"], round(g["rate"], 6), g["value"], g["count_mode"]])
+        return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="goals-{site_id}.csv"'})
+
+    def _goals_report(site_id: str, days: int, user):
         """Per goal: conversions, converting visitors, rate, value, daily trend and what the converters had been shown."""
         days = max(1, min(int(days), 90))
         since = time.time() - days * 86400
         with db() as con:
             owned_site(con, site_id, user)
-            goals = [goal_row(x) for x in con.execute("SELECT * FROM goals WHERE site_id=? ORDER BY created", (site_id,)).fetchall()]
-            visitors = con.execute("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type='pageview' AND ts>=?",
-                                   (site_id, since)).fetchone()["n"] or 0
-            conv_rows = con.execute(
-                "SELECT name gid, visitor_id v, COUNT(*) n, MIN(ts) first_ts, SUM(COALESCE(json_extract(props,'$.value'),0)) val "
-                "FROM events WHERE site_id=? AND type='conversion' AND ts>=? GROUP BY name, visitor_id", (site_id, since)).fetchall()
-            daily_rows = con.execute(
-                "SELECT name gid, date(ts,'unixepoch') d, COUNT(*) n, COUNT(DISTINCT visitor_id) v, SUM(COALESCE(json_extract(props,'$.value'),0)) val "
-                "FROM events WHERE site_id=? AND type='conversion' AND ts>=? GROUP BY name, d ORDER BY d", (site_id, since)).fetchall()
-            expo_rows = con.execute(
-                "SELECT exp_id, variant, visitor_id v, MIN(ts) first_ts FROM events "
-                "WHERE site_id=? AND type IN ('impression','exposure') AND exp_id IS NOT NULL AND ts>=? "
-                "GROUP BY exp_id, variant, visitor_id LIMIT 200000", (site_id, since)).fetchall()
-            names = {}
-            for tbl in ("campaigns", "experiments"):
-                for c in con.execute(f"SELECT id, name FROM {tbl} WHERE site_id=?", (site_id,)).fetchall():
-                    names[c["id"]] = (c["name"], "campaign" if tbl == "campaigns" else "test")
+            g_c, vis_c, conv_c, daily_c, expo_c, camp_c, exp_c = con.multi([
+                ("SELECT * FROM goals WHERE site_id=? ORDER BY created", (site_id,)),
+                ("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type='pageview' AND ts>=?", (site_id, since)),
+                ("SELECT name gid, visitor_id v, COUNT(*) n, MIN(ts) first_ts, SUM(COALESCE(json_extract(props,'$.value'),0)) val "
+                 "FROM events WHERE site_id=? AND type='conversion' AND ts>=? GROUP BY name, visitor_id", (site_id, since)),
+                ("SELECT name gid, date(ts,'unixepoch') d, COUNT(*) n, COUNT(DISTINCT visitor_id) v, SUM(COALESCE(json_extract(props,'$.value'),0)) val "
+                 "FROM events WHERE site_id=? AND type='conversion' AND ts>=? GROUP BY name, d ORDER BY d", (site_id, since)),
+                ("SELECT exp_id, variant, visitor_id v, MIN(ts) first_ts FROM events "
+                 "WHERE site_id=? AND type IN ('impression','exposure') AND exp_id IS NOT NULL AND ts>=? "
+                 "GROUP BY exp_id, variant, visitor_id LIMIT 200000", (site_id, since)),
+                ("SELECT id, name FROM campaigns WHERE site_id=?", (site_id,)),
+                ("SELECT id, name FROM experiments WHERE site_id=?", (site_id,)),
+            ])
+            goals = [goal_row(x) for x in g_c.fetchall()]
+            visitors = vis_c.fetchone()["n"] or 0
+            conv_rows, daily_rows, expo_rows = conv_c.fetchall(), daily_c.fetchall(), expo_c.fetchall()
+            names = {c["id"]: (c["name"], "campaign") for c in camp_c.fetchall()}
+            names.update({c["id"]: (c["name"], "test") for c in exp_c.fetchall()})
 
         conv_by_goal = defaultdict(dict)
         for x in conv_rows:

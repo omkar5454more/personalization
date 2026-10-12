@@ -100,6 +100,16 @@ hour, weekday and "has done event X". Add your own with `OT.identify({...})` (up
 - **Redirect action:** send matching visitors to another address (never in a loop, at most 3 per visit; only `https://…` or a single-slash path).
 - Not built (on purpose or not yet): matching by company / IP range (we never store IPs), pushing campaign names to Google Analytics, teams and roles.
 
+## Schedules, limits, control groups and more (campaign form → "Schedule, limits & control group")
+- **Schedule**: run from / until (UTC under the hood). Outside the window the SDK is not even sent the campaign. Tests can be scheduled via the API too (`start_at` / `end_at`).
+- **Limits**: "show at most N times per visitor" and "wait H hours between showings", on top of once / per visit / always.
+- **Priority + one overlay at a time**: turn on *Install & settings → One banner / popup at a time*; the highest priority wins per page.
+- **Control group**: keep 1-50% of matching visitors *unexposed*. They are recorded as `impression` with variant `control`; conversions on the campaign goal are compared (lift, significance, Bayesian probability) in the campaigns list. Requires a goal.
+- **QA link**: the **QA link** button copies `?ot_force=<campaign id>` for your page. It shows only that campaign, ignoring rules/frequency, and records nothing.
+- **IP address rule**: single IP, `a.b.c.d-e.f.g.h` range or `a.b.c.d/24` CIDR (IPv4; IPv6 exact). The visitor's own IP is returned by `/ctx` to their browser only; it is never stored.
+- **Google Analytics / Tag Manager**: *Send events to Google Analytics* pushes `optimize_campaign_shown`, `optimize_test_exposure`, `optimize_goal`, `optimize_campaign_control` to `dataLayer` (and `gtag` when present).
+- **Duplicate** a campaign, and **CSV exports**: campaigns list, goals report (`/goals/report.csv`) and A/B results (`/api/experiments/<id>/results.csv`). Cells starting with `= + - @` are neutralised against spreadsheet formula injection.
+
 ## Tests
     python -m pytest tests          # stats + API (uses a throw-away database)
     tests/e2e                       # the real SDK and dashboard scripts in jsdom -- see tests/e2e/README.md
