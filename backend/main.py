@@ -1113,6 +1113,7 @@ async def collect(request: Request):
         raise HTTPException(400, "bad payload")
     host = str(payload.get("host") or "")[:100]
     country = request.headers.get("cf-ipcountry") or request.headers.get("x-vercel-ip-country")
+    geo_loc = location_from_headers(request.headers)
     cfg = perf.site_cfg.get(site_id)       # (domain, settings): cached ~60 s, saves one database round trip per page view
     if cfg is None:
         with db() as con:
@@ -1135,6 +1136,10 @@ async def collect(request: Request):
             props = e.get("props") if isinstance(e.get("props"), dict) else {}
             if e["type"] == "pageview" and country and country not in {"XX", "T1"}:
                 props = {**props, "country": country}
+                if geo_loc["region"]:
+                    props["region"] = geo_loc["region"][:60]          # state / region name (no IP address is ever stored)
+                if geo_loc["city"]:
+                    props["city"] = geo_loc["city"][:60]
             try:
                 visit_no = int(e.get("visit_no") or 1)
             except (TypeError, ValueError):

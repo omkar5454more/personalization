@@ -141,6 +141,10 @@ async function pageOverview(view) {
       <div class="card card-pad"><h3>Countries</h3>${barList(ov.countries, "Needs a geo header (Cloudflare/Vercel) — not available locally")}</div>
     </div>
     <div class="grid g2" style="margin-top:16px">
+      <div class="card card-pad"><h3>States / regions</h3>${barList(ov.regions, "Shows up for new visits once the site is live on a host that sends location (Vercel, Cloudflare)")}</div>
+      <div class="card card-pad"><h3>Cities</h3>${barList(ov.cities, "Shows up for new visits once the site is live on a host that sends location (Vercel, Cloudflare)")}</div>
+    </div>
+    <div class="grid g2" style="margin-top:16px">
       <div class="card card-pad"><h3>Running now</h3>
         ${runExp.length || runCamp.length ? `<table><tbody>
           ${runExp.map(e => `<tr><td>⚗ ${esc(e.name)}</td><td class="muted">A/B test</td><td class="right"><a href="#/site/${esc(s.id)}/experiments">Results</a></td></tr>`).join("")}
