@@ -8,7 +8,7 @@ const RULE_GROUPS = [
     ["days_since_first", "Days since first visit", "30"], ["customer", "Is a customer", "true"], ["device", "Device", "mobile"],
     ["os", "Operating system", "ios, android, windows, macos, linux"], ["browser", "Browser", "chrome, safari, firefox, edge"],
     ["language", "Browser language", "en, hi, fr"], ["country", "Country code", "IN, US"], ["region", "State or region", "Maharashtra, California"],
-    ["city", "City", "Mumbai"]]],
+    ["city", "City", "Mumbai"], ["ip", "IP address or range", "203.0.113.7, 10.0.0.0/8, 192.168.1.10-192.168.1.50"]]],
   ["Where they came from", [
     ["traffic_source", "Traffic source", "direct, organic, social, email, paid, referral"], ["referrer_host", "Referrer website", "google.com"],
     ["search_keyword", "Search keyword", "running shoes"], ["utm_source", "UTM source", "google"], ["utm_medium", "UTM medium", "cpc"],
@@ -65,7 +65,7 @@ function ruleBuilder(host, initial = [], { max = 10, nested = false } = {}) {
       }
       const dk = dynKind(r.field), attrName = dk ? r.field.slice(dk.length + 1) : "";
       const exist = EXISTENCE_FIELDS[r.field];
-      const opts = exist ? [["eq", "has"], ["neq", "has not"]] : RULE_OPS;
+      const opts = exist ? [["eq", "has"], ["neq", "has not"]] : r.field === "ip" ? [["in", "is one of"], ["neq", "is not"]] : RULE_OPS;
       const valueEl = BOOL_FIELDS.has(r.field)
         ? `<select data-rv="${i}" style="width:130px"><option value="true" ${r.value !== "false" ? "selected" : ""}>true</option><option value="false" ${r.value === "false" ? "selected" : ""}>false</option></select>`
         : `<input data-rv="${i}" type="text" class="grow" placeholder="${esc(dk ? "value, e.g. pro or 100" : (RULE_HINT[r.field] || "value"))}" value="${esc(r.value)}">`;
@@ -84,6 +84,7 @@ function ruleBuilder(host, initial = [], { max = 10, nested = false } = {}) {
       else {
         rows[i].field = s.value;
         if (EXISTENCE_FIELDS[s.value] && !["eq", "neq"].includes(rows[i].op)) rows[i].op = "eq";
+        if (s.value === "ip" && !["in", "neq"].includes(rows[i].op)) rows[i].op = "in";
         if (BOOL_FIELDS.has(s.value)) rows[i].value = "true";
       }
       render();

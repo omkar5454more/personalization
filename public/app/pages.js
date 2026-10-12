@@ -234,6 +234,13 @@ function triggerText(cfg) {
   const pm = cfg.url_contains ? ({ starts: "pages starting with", equals: "only", contains: "pages containing", all: "" }[cfg.page_match || "contains"] + " " + cfg.url_contains).trim() : "all pages";
   return `${t} · ${pm}`;
 }
+function controlLine(c) {
+  const r = c.control_results;
+  if (!r) return c.config.holdout_pct ? `<div class="muted" style="font-size:12px">${c.config.holdout_pct}% control group — collecting data</div>` : "";
+  const shown = r.variants.find(v => v.variant === "shown"), ctl = r.variants.find(v => v.variant === "control");
+  const up = r.uplift == null ? "not enough data yet" : `${r.uplift >= 0 ? "+" : ""}${(r.uplift * 100).toFixed(1)}% vs control${r.significant ? " ✓ significant" : ""}`;
+  return `<div style="font-size:12px;margin-top:3px" title="Control group: ${fmtNum(ctl.visitors)} visitors, ${fmtNum(ctl.conversions)} converted. Shown: ${fmtNum(shown.visitors)} visitors, ${fmtNum(shown.conversions)} converted.">Control group ${r.holdout_pct}% · <b>${esc(up)}</b></div>`;
+}
 function actionSummary(actions) {
   const n = {};
   actions.forEach(a => { n[a.type] = (n[a.type] || 0) + 1; });
@@ -244,16 +251,28 @@ async function pageCampaigns(view) {
   const s = curSite();
   const [camps, segs] = await Promise.all([api(`/api/sites/${s.id}/campaigns`), api(`/api/sites/${s.id}/segments`, { cache: 20000 }).catch(() => [])]);
   view.innerHTML = siteHead("Personalization", "Show banners and popups only to the visitors you choose — for example returning visitors, a third visit, a traffic source or mobile users.",
-    `<button class="btn" id="new-visual">✎ Edit page visually</button><button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
+    `<a class="btn" href="/api/sites/${esc(s.id)}/campaigns.csv" download>⬇ Export CSV</a><button class="btn" id="new-visual">✎ Edit page visually</button><button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
     <div class="card">${camps.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Who sees it</th><th>Shown</th><th class="right">Seen by</th><th class="right">Clicked</th><th class="right">Converted</th><th></th></tr></thead><tbody>
-      ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(actionSummary(c.config.actions))}</div></td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
+      ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(actionSummary(c.config.actions))}</div>${controlLine(c)}</td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span>${c.schedule_state ? `<div class="muted" style="font-size:12px">${c.schedule_state === "scheduled" ? "starts " + esc(new Date(c.config.start_at).toLocaleString()) : "ended " + esc(new Date(c.config.end_at).toLocaleString())}</div>` : (c.status === "running" && c.config.end_at ? `<div class="muted" style="font-size:12px">until ${esc(new Date(c.config.end_at).toLocaleString())}</div>` : "")}</td>
         <td class="muted">${(() => { const sg = c.config.segment_id && segs.find(x => x.id === c.config.segment_id); return sg ? `<b>${esc(sg.name)}</b><div>${esc(rulesText(sg.rules, sg.match))}</div>` : esc(rulesText(c.config.rules, c.config.match)); })()}</td>
         <td class="muted">${esc({ once: "Once per visitor", session: "Once per visit", always: "Every page load" }[c.config.frequency])}<div>${esc(triggerText(c.config))}</div></td>
         <td class="right">${fmtNum(c.impressions)}</td><td class="right">${fmtNum(c.clicks)}</td><td class="right">${fmtNum(c.conversions)}</td>
-        <td class="right nowrap"><button class="btn sm" data-edit-camp="${esc(c.id)}">Edit</button> ${statusButtons("campaigns", c.id, c.status)}</td></tr>`).join("")}</tbody></table></div>`
+        <td class="right nowrap"><button class="btn sm" data-edit-camp="${esc(c.id)}">Edit</button> <button class="btn sm" data-dup-camp="${esc(c.id)}" title="Make a copy">Duplicate</button> <button class="btn sm" data-qa-camp="${esc(c.id)}" title="Copy a link that shows this campaign on your site, whatever the rules">QA link</button> ${statusButtons("campaigns", c.id, c.status)}</td></tr>`).join("")}</tbody></table></div>`
       : `<div class="empty"><b>No campaigns yet</b>Try: “Returning visitor → welcome-back banner”, or “3rd visit → show a signup form” (HubSpot, Typeform, Google Forms or your own HTML/CSS/JS).<br><br><button class="btn primary" id="new-visual-2">✎ Edit your page visually</button> <button class="btn" id="new-camp-2">＋ Banner / popup / form</button></div>`}</div>`;
   bindStatus(view);
   $$("[data-edit-camp]", view).forEach(b => b.onclick = () => openCampaignModal(s, camps.find(c => c.id === b.dataset.editCamp)));
+  $$("[data-dup-camp]", view).forEach(b => b.onclick = async () => {
+    const c = camps.find(x => x.id === b.dataset.dupCamp); b.disabled = true;
+    try { const copy = { ...c.config, name: (c.name + " (copy)").slice(0, 120) }; delete copy.id; await api(`/api/sites/${s.id}/campaigns`, { method: "POST", body: copy }); toast("Copied — the copy is a draft, start it when ready"); route(); }
+    catch (e) { toast(e.message, true); b.disabled = false; }
+  });
+  $$("[data-qa-camp]", view).forEach(b => b.onclick = async () => {
+    const c = camps.find(x => x.id === b.dataset.qaCamp);
+    const base = prompt("Which page of your site should the link open? (full address)", localStorage.getItem("ot_last_url_" + s.id) || ("https://" + (s.domain || "example.com") + "/"));
+    if (!base) return;
+    try { const u = new URL(base); u.searchParams.set("ot_force", c.id); await navigator.clipboard.writeText(u.href); toast("Link copied. Open it to see this campaign on the site (nothing is tracked). The snippet must be installed and the campaign running."); }
+    catch { toast("Enter a full address like https://yoursite.com/", true); }
+  });
   ["#new-camp", "#new-camp-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => openNewCampaign(s); });
   ["#new-visual", "#new-visual-2"].forEach(id => { const b = $(id, view); if (b) b.onclick = () => openNewCampaign(s, { visual: true }); });
 }
@@ -391,6 +410,8 @@ OT.q.push(["identify", { plan: "pro", customer: true, cart_value: 120 }]);
 // later, e.g. when someone buys (also counts for the "customer" and "has done an event" rules):
 OT.track("purchase", { value: 49 });</pre></div></div>
     <div class="card card-pad"><h2>6 · Privacy &amp; cookies</h2>
+      ${sw("one_overlay", "One banner / popup at a time", "When several campaigns match, only the one with the highest priority is shown on a page, so visitors never get a pile of overlays.")}
+      ${sw("ga_events", "Send events to Google Analytics", "Pushes campaign shown / test exposure / goal events to <code>dataLayer</code> (and gtag) so you can report on them in GA4 or Tag Manager.")}
       ${sw("consent_required", "Require consent before tracking", "When on, nothing is stored or sent until your cookie banner calls <code>OT.consent(true)</code>. Recommended for EU/UK visitors.")}
       ${sw("restrict_origin", "Only accept events from my domain", "Ignores events sent from other websites. Best-effort protection against someone copying your snippet; needs the Domain above to be set (subdomains such as www. are allowed).")}
       <p class="muted" style="margin-bottom:6px">Optimize sets one first-party cookie (<code>_ot</code>, 1 year) and mirrors it in localStorage to recognise returning visitors. No IP address is stored.</p>

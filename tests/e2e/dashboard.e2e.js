@@ -90,6 +90,30 @@ async function api(path, method = "GET", body) {
     && ui.config.segment_id === segs.find(s => s.name === "UI audience").id && ui.config.goal.name === "signup" && !!ui.config.goal_id && ui.config.auto_winner && ui.config.ship_winner
     && ui.config.min_visitors === 250 && ui.config.min_days === 5 && ui.config.secondary_goal_ids.length === 0, JSON.stringify(ui && ui.config).slice(0, 400));
 
+  // ---- campaign modal: schedule, limits, control group, IP rule; list: duplicate, QA link, control result
+  await go("campaigns");
+  await w.openCampaignModal(w.eval("curSite()"), null, {}); await sleep(500);
+  m().querySelector("#c-name").value = "UI scheduled";
+  m().querySelector("#c-text").value = "Hello";
+  m().querySelector("#c-start").value = "2030-01-05T09:30"; m().querySelector("#c-end").value = "2030-01-20T18:00";
+  m().querySelector("#c-maxv").value = "3"; m().querySelector("#c-cool").value = "12"; m().querySelector("#c-prio").value = "7";
+  m().querySelector("#c-goal").value = (await api(`/api/sites/${site}/goals`)).find(g => g.name === "Signup").id; m().querySelector("#c-hold").value = "20";
+  const rf = m().querySelector("[data-rf]"); rf.value = "ip"; rf.dispatchEvent(new w.Event("change", { bubbles: true })); await sleep(100);
+  check("IP rule only offers 'is one of' / 'is not'", Array.from(m().querySelector("[data-ro]").options).map(o => o.value).join() === "in,neq");
+  m().querySelector("[data-rv]").value = "10.0.0.0/8, 203.0.113.7";
+  m().querySelector("#c-save").click(); await sleep(900);
+  let sc = (await api(`/api/sites/${site}/campaigns`)).find(c => c.name === "UI scheduled");
+  check("schedule, limits, priority, control group and IP rule are saved", sc && /^2030-01-05T/.test(sc.config.start_at) && /^2030-01-20T/.test(sc.config.end_at) && sc.config.max_views === 3
+    && sc.config.cooldown_hours === 12 && sc.config.priority === 7 && sc.config.holdout_pct === 20 && sc.config.rules[0].field === "ip" && sc.config.rules[0].value === "10.0.0.0/8, 203.0.113.7", JSON.stringify(sc && sc.config).slice(0, 400));
+  await go("campaigns");
+  check("list shows the control group line", /Control group 20%/.test(d.querySelector("#view").textContent));
+  d.querySelector(`[data-dup-camp="${sc.id}"]`).click(); await sleep(900);
+  check("Duplicate makes a draft copy", (await api(`/api/sites/${site}/campaigns`)).some(c => c.name === "UI scheduled (copy)" && c.status === "draft"));
+  check("CSV export link is present", !!d.querySelector('a[href$="/campaigns.csv"]'));
+  await w.openCampaignModal(w.eval("curSite()"), sc, {}); await sleep(500);
+  check("editing shows the saved schedule again", m().querySelector("#c-maxv").value === "3" && m().querySelector("#c-hold").value === "20" && /^2030-01-05T/.test(m().querySelector("#c-start").value));
+  m().querySelector("[data-close]").click();
+
   // ---- campaign modal: segment picker + custom rules builder + goal
   await go("campaigns");
   await w.openCampaignModal(w.eval("curSite()"), null, {}); await sleep(500);
