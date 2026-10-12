@@ -89,7 +89,7 @@ def build_router(db, current_user, owned_site) -> APIRouter:
         since = _since(days)
         with db() as con:
             owned_site(con, site_id, user)
-            tot_c, eng_c, daily_c, src_c, dev_c, ctry_c, ev_c = con.multi([
+            tot_c, eng_c, daily_c, src_c, dev_c, ctry_c, reg_c, city_c, ev_c = con.multi([
                 ("SELECT COUNT(DISTINCT visitor_id) v, COUNT(DISTINCT session_id) s, COUNT(*) pv, "
                  "COUNT(DISTINCT CASE WHEN is_returning=0 THEN visitor_id END) new_v, "
                  "COUNT(DISTINCT CASE WHEN is_returning=1 THEN visitor_id END) ret_v "
@@ -109,11 +109,18 @@ def build_router(db, current_user, owned_site) -> APIRouter:
                 ("SELECT json_extract(props,'$.country') c, COUNT(DISTINCT visitor_id) v FROM events "
                  "WHERE site_id=? AND type='pageview' AND ts>=? AND json_extract(props,'$.country') IS NOT NULL "
                  "GROUP BY c ORDER BY v DESC LIMIT 8", (site_id, since)),
+                ("SELECT json_extract(props,'$.region') c, json_extract(props,'$.country') k, COUNT(DISTINCT visitor_id) v FROM events "
+                 "WHERE site_id=? AND type='pageview' AND ts>=? AND json_extract(props,'$.region') IS NOT NULL "
+                 "GROUP BY c, k ORDER BY v DESC LIMIT 10", (site_id, since)),
+                ("SELECT json_extract(props,'$.city') c, json_extract(props,'$.region') r, COUNT(DISTINCT visitor_id) v FROM events "
+                 "WHERE site_id=? AND type='pageview' AND ts>=? AND json_extract(props,'$.city') IS NOT NULL "
+                 "GROUP BY c, r ORDER BY v DESC LIMIT 10", (site_id, since)),
                 ("SELECT name, COUNT(*) n, COUNT(DISTINCT visitor_id) v FROM events "
                  "WHERE site_id=? AND type='event' AND ts>=? GROUP BY name ORDER BY n DESC LIMIT 8", (site_id, since)),
             ])
             tot, eng = tot_c.fetchone(), eng_c.fetchone()
             daily, sources, devices, countries, top_events = daily_c.fetchall(), src_c.fetchall(), dev_c.fetchall(), ctry_c.fetchall(), ev_c.fetchall()
+            regions, cities = reg_c.fetchall(), city_c.fetchall()
         return {
             "days": days,
             "visitors": tot["v"], "sessions": tot["s"], "pageviews": tot["pv"],
@@ -123,6 +130,8 @@ def build_router(db, current_user, owned_site) -> APIRouter:
             "sources": [{"name": x["src"], "visitors": x["v"]} for x in sources],
             "devices": [{"name": x["d"], "visitors": x["v"]} for x in devices],
             "countries": [{"name": x["c"], "visitors": x["v"]} for x in countries],
+            "regions": [{"name": f'{x["c"]}, {x["k"]}' if x["k"] else x["c"], "visitors": x["v"]} for x in regions],
+            "cities": [{"name": f'{x["c"]}, {x["r"]}' if x["r"] else x["c"], "visitors": x["v"]} for x in cities],
             "custom_events": [{"name": x["name"], "count": x["n"], "visitors": x["v"]} for x in top_events],
         }
 
@@ -225,7 +234,13 @@ def build_router(db, current_user, owned_site) -> APIRouter:
                 "MAX(is_returning) is_ret, MAX(visit_no) visits, "
                 "SUM(type='autoclick') clicks, "
                 "(SELECT json_extract(e2.props,'$.device') FROM events e2 WHERE e2.visitor_id=e.visitor_id "
-                "  AND e2.site_id=e.site_id AND e2.type='pageview' ORDER BY e2.ts DESC LIMIT 1) device "
+                "  AND e2.site_id=e.site_id AND e2.type='pageview' ORDER BY e2.ts DESC LIMIT 1) device, "
+                "(SELECT json_extract(e3.props,'$.city') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) city, "
+                "(SELECT json_extract(e3.props,'$.region') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) region, "
+                "(SELECT json_extract(e3.props,'$.country') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) country "
                 "FROM events e WHERE site_id=? AND ts>=? GROUP BY visitor_id ORDER BY last_seen DESC LIMIT 100",
                 (site_id, since)).fetchall()
         return [dict(x) for x in rows]

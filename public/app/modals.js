@@ -679,7 +679,10 @@ async function openVisitor(site, vid) {
   try {
     const ev = await api(`/api/sites/${site.id}/visitors/${encodeURIComponent(vid)}/timeline`);
     const pv = ev.filter(e => e.type === "pageview").length, sessions = new Set(ev.map(e => e.session_id)).size;
+    const lastGeo = ev.filter(e => e.type === "pageview" && e.props && e.props.country).pop();
+    const where = lastGeo ? [lastGeo.props.city, lastGeo.props.region, lastGeo.props.country].filter(Boolean).join(", ") : "";
     $(".modal-body", m.el).innerHTML = `<div class="grid g3" style="margin-bottom:14px">${kpi("Events", fmtNum(ev.length))}${kpi("Pageviews", fmtNum(pv))}${kpi("Visits", fmtNum(sessions))}</div>
+      ${where ? `<div class="muted" style="margin-bottom:12px">📍 ${esc(where)}</div>` : ""}
       <ul class="timeline">${ev.map(e => { const [ic, txt] = describeEvent(e); return `<li><span class="ic">${ic}</span><span>${txt}</span><span class="tm">${clock(e.ts)}</span></li>`; }).join("")}</ul>
       ${ev.length >= 500 ? '<div class="muted">Showing the most recent 500 events.</div>' : ""}`;
   } catch (e) { $(".modal-body", m.el).innerHTML = `<div class="callout warn">${esc(e.message)}</div>`; }
