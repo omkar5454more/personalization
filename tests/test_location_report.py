@@ -38,3 +38,11 @@ def test_missing_location_is_skipped_and_ip_not_stored(client, site):
     with db() as con:
         rows = con.execute("SELECT props FROM events WHERE site_id=? AND visitor_id IN ('x1','x2')", (site,)).fetchall()
     assert rows and all('"ip"' not in r["props"] for r in rows)
+
+
+def test_visitor_list_shows_city(client, site):
+    hit(client, site, "vl1", city="Nagpur")
+    hit(client, site, "vl2", region=None, city=None)
+    rows = {r["visitor_id"]: r for r in client.get(f"/api/sites/{site}/visitor-list?days=14").json()}
+    assert (rows["vl1"]["city"], rows["vl1"]["region"], rows["vl1"]["country"]) == ("Nagpur", "Maharashtra", "IN")
+    assert rows["vl2"]["city"] is None and rows["vl2"]["country"] == "IN"

@@ -343,13 +343,14 @@ function describeEvent(e) {
     default: return ["•", esc(e.type)];
   }
 }
+const placeText = v => [v.city, v.region, v.country].filter(Boolean).join(", ") || "–";
 async function pageVisitors(view) {
   const s = curSite();
   const rows = await api(`/api/sites/${s.id}/visitor-list?days=${S.days}`);
   view.innerHTML = siteHead("Visitors", "Individual people (identified by a cookie, not by name) and everything each one did. Click a row to see their journey.", rangeSeg()) +
-    `<div class="card">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Visitor</th><th>Type</th><th>Device</th><th class="right">Visits</th><th class="right">Pageviews</th><th class="right">Clicks</th><th>First seen</th><th>Last seen</th></tr></thead><tbody>
+    `<div class="card">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Visitor</th><th>Type</th><th>Location</th><th>Device</th><th class="right">Visits</th><th class="right">Pageviews</th><th class="right">Clicks</th><th>First seen</th><th>Last seen</th></tr></thead><tbody>
       ${rows.map(v => `<tr class="click" data-v="${esc(v.visitor_id)}"><td class="mono">${esc(v.visitor_id.slice(0, 8))}</td><td>${v.is_ret ? '<span class="pill receiving">returning</span>' : '<span class="pill">new</span>'}</td>
-        <td class="muted">${esc(v.device || "–")}</td><td class="right">${fmtNum(v.visits)}</td><td class="right">${fmtNum(v.pageviews)}</td><td class="right">${fmtNum(v.clicks)}</td>
+        <td class="muted">${esc(placeText(v))}</td><td class="muted">${esc(v.device || "–")}</td><td class="right">${fmtNum(v.visits)}</td><td class="right">${fmtNum(v.pageviews)}</td><td class="right">${fmtNum(v.clicks)}</td>
         <td class="muted nowrap">${clock(v.first_seen)}</td><td class="muted nowrap">${ago(v.last_seen)}</td></tr>`).join("")}</tbody></table></div>` : noData()}</div>`;
   bindRange(() => pageVisitors(view));
   $$("[data-v]", view).forEach(r => r.onclick = () => openVisitor(s, r.dataset.v));

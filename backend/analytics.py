@@ -234,7 +234,13 @@ def build_router(db, current_user, owned_site) -> APIRouter:
                 "MAX(is_returning) is_ret, MAX(visit_no) visits, "
                 "SUM(type='autoclick') clicks, "
                 "(SELECT json_extract(e2.props,'$.device') FROM events e2 WHERE e2.visitor_id=e.visitor_id "
-                "  AND e2.site_id=e.site_id AND e2.type='pageview' ORDER BY e2.ts DESC LIMIT 1) device "
+                "  AND e2.site_id=e.site_id AND e2.type='pageview' ORDER BY e2.ts DESC LIMIT 1) device, "
+                "(SELECT json_extract(e3.props,'$.city') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) city, "
+                "(SELECT json_extract(e3.props,'$.region') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) region, "
+                "(SELECT json_extract(e3.props,'$.country') FROM events e3 WHERE e3.visitor_id=e.visitor_id AND e3.site_id=e.site_id "
+                "  AND e3.type='pageview' AND json_extract(e3.props,'$.country') IS NOT NULL ORDER BY e3.ts DESC LIMIT 1) country "
                 "FROM events e WHERE site_id=? AND ts>=? GROUP BY visitor_id ORDER BY last_seen DESC LIMIT 100",
                 (site_id, since)).fetchall()
         return [dict(x) for x in rows]
