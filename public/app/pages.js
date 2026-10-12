@@ -100,20 +100,35 @@ function counts(o) {
 }
 
 // ---------------------------------------------------------------- Overview
+// "Getting started" checklist: each step ticks itself off from real data; can be dismissed per site.
+function onboardingCard(s, { exps, camps, goals, segs }) {
+  try { if (localStorage.getItem("ot_onb_" + s.id) === "1") return ""; } catch { /* ignore */ }
+  const steps = [
+    ["Connect your site", s.status !== "waiting", "Paste the snippet in your site's <head>.", `#/site/${s.id}/settings`],
+    ["Define a goal", goals.some(g => !g.archived), "What counts as a conversion: a signup, a purchase, a click.", `#/site/${s.id}/goals`],
+    ["Save an audience", segs.length > 0, "Who you want to reach, written once and reused.", `#/site/${s.id}/audiences`],
+    ["Launch a personalization", camps.some(c => c.status === "running"), "A banner, popup or page change for the right visitors.", `#/site/${s.id}/campaigns`],
+    ["Run an A/B test", exps.some(e => e.status === "running" || e.status === "completed"), "Compare versions and see which converts better.", `#/site/${s.id}/experiments`],
+  ];
+  const done = steps.filter(x => x[1]).length;
+  if (done === steps.length) return "";
+  return `<div class="card onboard" data-testid="onboarding"><div class="row" style="justify-content:space-between"><div><h2>Get started with ${esc(s.name)}</h2>
+    <div class="muted">${done} of ${steps.length} done — a few minutes to your first personalised experience.</div></div>
+    <button class="btn sm" id="onb-hide">Hide</button></div><div class="meter"><i style="width:${done / steps.length * 100}%"></i></div>
+    <div class="todo">${steps.map(([t, ok, d, href]) => `<a href="${esc(href)}" class="${ok ? "done" : ""}"><span class="chk">${ok ? "✓" : ""}</span><span><b>${esc(t)}</b><small>${d}</small></span></a>`).join("")}</div></div>`;
+}
 async function pageOverview(view) {
   const s = curSite();
-  const [ov, exps, camps] = await Promise.all([
-    api(`/api/sites/${s.id}/overview?days=${S.days}`), api(`/api/sites/${s.id}/experiments`), api(`/api/sites/${s.id}/campaigns`)]);
+  const [ov, exps, camps, goals, segs] = await Promise.all([
+    api(`/api/sites/${s.id}/overview?days=${S.days}`), api(`/api/sites/${s.id}/experiments`), api(`/api/sites/${s.id}/campaigns`),
+    api(`/api/sites/${s.id}/goals`, { cache: 20000 }).catch(() => []), api(`/api/sites/${s.id}/segments`, { cache: 20000 }).catch(() => [])]);
   const runExp = exps.filter(e => e.status === "running"), runCamp = camps.filter(c => c.status === "running");
   const retShare = ov.visitors ? ov.returning_visitors / ov.visitors : null;
   const ch = stackedChart(ov.daily, S.days);
   const first = s.status === "waiting";
   view.innerHTML = siteHead("Overview", "How many people visit, where they come from, and how engaged they are.",
     `${statusPill(s.status)}${rangeSeg()}`) + `
-    ${first ? `<div class="card card-pad" style="margin-bottom:16px"><h2>Get started with ${esc(s.name)}</h2><ol class="steps">
-      <li><div><b>Install the snippet</b><div class="muted">Paste it into the &lt;head&gt; of your site. <a href="#/site/${esc(s.id)}/settings">Get the snippet →</a></div></div></li>
-      <li><div><b>Open your site once</b><div class="muted">This page switches to “Live” as soon as the first visit arrives.</div></div></li>
-      <li><div><b>Run your first test or campaign</b><div class="muted"><a href="#/site/${esc(s.id)}/experiments">A/B tests</a> · <a href="#/site/${esc(s.id)}/campaigns">Personalization</a></div></div></li></ol></div>` : ""}
+    ${onboardingCard(s, { exps, camps, goals, segs })}
     <div class="grid g6" style="margin-bottom:16px">
       ${kpi("Visitors", fmtNum(ov.visitors))}${kpi("Sessions", fmtNum(ov.sessions))}${kpi("Pageviews", fmtNum(ov.pageviews))}
       ${kpi("Avg time on page", fmtDur(ov.avg_seconds), "active time")}${kpi("Avg scroll depth", ov.avg_scroll == null ? "–" : Math.round(ov.avg_scroll) + "%")}
@@ -135,6 +150,8 @@ async function pageOverview(view) {
     </div>`;
   bindRange(() => route());
   bindChart(view, ch.list);
+  const hide = $("#onb-hide", view);
+  if (hide) hide.onclick = () => { try { localStorage.setItem("ot_onb_" + s.id, "1"); } catch { /* ignore */ } $(".onboard", view).remove(); };
 }
 
 // ---------------------------------------------------------------- A/B tests
@@ -182,8 +199,8 @@ function bindStatus(view) {
 }
 async function pageExperiments(view) {
   const s = curSite();
-  const [exps, segs] = await Promise.all([api(`/api/sites/${s.id}/experiments`), api(`/api/sites/${s.id}/segments`).catch(() => [])]);
-  const results = await Promise.all(exps.map(e => api(`/api/experiments/${e.id}/results`).catch(() => null)));
+  const [exps, segs] = await Promise.all([api(`/api/sites/${s.id}/experiments?with_results=1`), api(`/api/sites/${s.id}/segments`, { cache: 20000 }).catch(() => [])]);
+  const results = exps.map(e => e.results || null);
   view.innerHTML = siteHead("A/B tests", "Show different versions of a page to different visitors and measure which converts better. Build changes with the point-and-click editor; test two versions or several.",
     `<button class="btn primary" id="new-exp">＋ New A/B test</button>`) +
     (exps.length ? exps.map((e, i) => {
@@ -225,7 +242,7 @@ function actionSummary(actions) {
 }
 async function pageCampaigns(view) {
   const s = curSite();
-  const [camps, segs] = await Promise.all([api(`/api/sites/${s.id}/campaigns`), api(`/api/sites/${s.id}/segments`).catch(() => [])]);
+  const [camps, segs] = await Promise.all([api(`/api/sites/${s.id}/campaigns`), api(`/api/sites/${s.id}/segments`, { cache: 20000 }).catch(() => [])]);
   view.innerHTML = siteHead("Personalization", "Show banners and popups only to the visitors you choose — for example returning visitors, a third visit, a traffic source or mobile users.",
     `<button class="btn" id="new-visual">✎ Edit page visually</button><button class="btn primary" id="new-camp">＋ New campaign</button>`) + `
     <div class="card">${camps.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Who sees it</th><th>Shown</th><th class="right">Seen by</th><th class="right">Clicked</th><th class="right">Converted</th><th></th></tr></thead><tbody>

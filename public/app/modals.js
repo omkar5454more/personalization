@@ -84,7 +84,7 @@ function sampleSize(baseline, relLift) {
 const VERSION_LETTERS = "BCDEF";
 
 async function openNewExperiment(site) {
-  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`, { cache: 20000 }).catch(() => []), api(`/api/sites/${site.id}/goals`, { cache: 20000 }).catch(() => [])]);
   const saved = goals.filter(g => !g.archived);
   EDITOR.siteId = site.id;
   let lastUrl = "";
@@ -358,7 +358,7 @@ function bannerLiveHtml(a, type) {
 function openNewCampaign(site, opts) { openCampaignModal(site, null, opts || {}); }
 
 async function openCampaignModal(site, existing, opts = {}) {
-  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`).catch(() => []), api(`/api/sites/${site.id}/goals`).catch(() => [])]);
+  const [segments, goals] = await Promise.all([api(`/api/sites/${site.id}/segments`, { cache: 20000 }).catch(() => []), api(`/api/sites/${site.id}/goals`, { cache: 20000 }).catch(() => [])]);
   const cfg = existing ? existing.config : null;
   const act = cfg ? cfg.actions[0] : null;
   const sel = (id, opts, cur, extra = "") => `<select id="${id}" ${extra}>${opts.map(([k, l]) => `<option value="${k}" ${String(cur) === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
