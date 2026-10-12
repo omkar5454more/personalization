@@ -6,6 +6,7 @@ A rule is `field op value`, evaluated in the visitor's browser by public/sdk.js 
 A *group* is a rule whose field is "__group": it carries its own `match` (all / any) and a list of plain rules, so
 conditions like  plan = pro AND (device = mobile OR source = organic)  can be written. Groups nest one level only.
 """
+import ipaddress
 import re
 from typing import Optional
 
@@ -22,6 +23,8 @@ RULE_FIELDS = {
     "search_keyword", "landing_page",
     # what they are doing / have done
     "url", "pages_viewed", "total_pageviews", "hour", "weekday", "did_event", "visited_page",
+    # network (the visitor's own IP is told to their browser by /ctx and compared there; it is never stored)
+    "ip",
 }
 # Fields that carry a name after a dot:  attr.plan (OT.identify), param.utm_x (URL parameter of THIS page),
 # cookie.tier (a cookie), var.user.plan (a JavaScript variable on the page).
@@ -62,6 +65,24 @@ def valid_field(field: str) -> bool:
     return field in RULE_FIELDS or any(p.match(field or "") for p in DYNAMIC_FIELDS.values())
 
 
+def parse_ip_entries(value: str) -> list:
+    """'203.0.113.7, 10.0.0.0/8, 192.168.1.10-192.168.1.50' -> list of valid entries; raises ValueError on a bad one."""
+    entries = [x.strip() for x in value.split(",") if x.strip()]
+    if not entries or len(entries) > 20:
+        raise ValueError("enter 1-20 IP addresses, ranges (a.b.c.d-e.f.g.h) or CIDR blocks (a.b.c.d/24)")
+    for e in entries:
+        if "-" in e and "/" not in e:
+            a, b = (x.strip() for x in e.split("-", 1))
+            lo, hi = ipaddress.ip_address(a), ipaddress.ip_address(b)
+            if lo.version != hi.version or lo > hi:
+                raise ValueError(f"'{e}' is not a valid range")
+        elif "/" in e:
+            ipaddress.ip_network(e, strict=False)
+        else:
+            ipaddress.ip_address(e)
+    return entries
+
+
 def _validate_one(r: Rule, what: str) -> None:
     if not valid_field(r.field) or r.op not in RULE_OPS:
         raise HTTPException(422, f"bad {what}: {r.field} {r.op}")
@@ -72,6 +93,13 @@ def _validate_one(r: Rule, what: str) -> None:
             raise HTTPException(422, f"'{r.field}' with ≥/≤ needs a number")
     if r.op == "in" and not [x for x in r.value.split(",") if x.strip()]:
         raise HTTPException(422, f"'{r.field} in' needs a comma-separated list")
+    if r.field == "ip":
+        if r.op not in {"eq", "neq", "in"}:
+            raise HTTPException(422, "'ip' supports 'is', 'is not' and 'is one of'")
+        try:
+            parse_ip_entries(r.value)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
     if r.field in EXISTENCE_FIELDS:
         if not r.value.strip():
             raise HTTPException(422, f"'{r.field}' needs a value (an event name / part of a page address)")

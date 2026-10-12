@@ -5,6 +5,7 @@ endpoint, a small JSON API for the dashboard, and the dashboard itself.
 Storage: SQLite locally, Turso (hosted libSQL) in production -- see backend/database.py.
 """
 import hashlib
+from datetime import datetime, timezone
 import hmac
 import json
 import math
@@ -67,7 +68,9 @@ async def database_error(request: Request, exc: DatabaseError):
 
 # ---------------------------------------------------------------- models
 DEFAULT_SETTINGS = {"auto_clicks": True, "auto_scroll": True, "auto_forms": True,
-                    "auto_spa": True, "consent_required": False, "restrict_origin": False}
+                    "auto_spa": True, "consent_required": False, "restrict_origin": False,
+                    "one_overlay": False,      # when on: at most one banner/popup per page, the highest-priority campaign wins
+                    "ga_events": False}        # push campaign / test / conversion events to dataLayer (and gtag)
 HOST_RE = re.compile(r"^(localhost|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(:\d{1,5})?$")
 
 
@@ -133,6 +136,8 @@ class ExperimentIn(BaseModel):
     segment_id: str = ""
     match: str = "all"
     rules: list[Rule] = []
+    start_at: str = Field(default="", max_length=40)
+    end_at: str = Field(default="", max_length=40)
     # decision helpers
     auto_winner: bool = False            # complete the test by itself once the evidence rule in stats.evaluate is met
     ship_winner: bool = False            # after completion keep serving the winning version to everyone
@@ -162,6 +167,7 @@ def validate_experiment(e: ExperimentIn):
         raise HTTPException(422, "need at least a control and one variant")
     if len(e.variants) > 6:
         raise HTTPException(422, "up to 6 versions per test")
+    validate_schedule(e.start_at, e.end_at)
     validate_rules(e.rules, e.match)
     keys = [v.key for v in e.variants]
     if len(set(keys)) != len(keys):
@@ -193,6 +199,8 @@ def resolve_refs(con, site_id: str, body) -> None:
         if not g:
             raise HTTPException(422, "that goal no longer exists")
         body.goal = Goal(**goal_as_test_goal(goal_row(g)))
+    if getattr(body, "holdout_pct", 0) and not body.goal:
+        raise HTTPException(422, "choose a conversion goal to measure the control group against")
     for gid in getattr(body, "secondary_goal_ids", []):
         if not con.execute("SELECT 1 FROM goals WHERE id=? AND site_id=?", (gid, site_id)).fetchone():
             raise HTTPException(422, "a secondary goal no longer exists")
@@ -706,6 +714,40 @@ def results(exp_id: str, user=Depends(current_user)):
         return compute_experiment_results(con, [row])[exp_id]
 
 
+def csv_response(filename: str, header: list, rows: list) -> Response:
+    """CSV download. Cells that start with = + - @ get a leading quote so a spreadsheet never runs them as formulas."""
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    safe = lambda v: ("'" + v) if isinstance(v, str) and v[:1] in ("=", "+", "-", "@") else v
+    w.writerow(header)
+    for r in rows:
+        w.writerow([safe(c) for c in r])
+    return Response(content=buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"})
+
+
+@app.get("/api/experiments/{exp_id}/results.csv")
+def results_csv(exp_id: str, user=Depends(current_user)):
+    with db() as con:
+        row = owned_experiment(con, exp_id, user)
+        res = compute_experiment_results(con, [row])[exp_id]
+    return csv_response(f"test-{exp_id}.csv", ["version", "visitors", "conversions", "rate", "range_low", "range_high", "uplift", "p_value", "p_adjusted", "prob_beats_control", "significant"],
+                        [[v["variant"], v["visitors"], v["conversions"], round(v["rate"], 6), round(v["ci_low"], 6), round(v["ci_high"], 6),
+                          "" if v["uplift"] is None else round(v["uplift"], 6), "" if v["p_value"] is None else round(v["p_value"], 6),
+                          "" if v["p_adjusted"] is None else round(v["p_adjusted"], 6),
+                          "" if v["prob_beat_control"] is None else round(v["prob_beat_control"], 4), v["significant"]] for v in res["variants"]])
+
+
+@app.get("/api/sites/{site_id}/campaigns.csv")
+def campaigns_csv(site_id: str, user=Depends(current_user)):
+    rows = list_campaigns(site_id, user)
+    return csv_response(f"campaigns-{site_id}.csv", ["campaign", "status", "shown_to", "clicked", "converted", "control_lift"],
+                        [[c["name"], c["status"], c["impressions"], c["clicks"], c["conversions"],
+                          "" if not c["control_results"] or c["control_results"]["uplift"] is None else round(c["control_results"]["uplift"], 4)] for c in rows])
+
+
 @app.get("/api/sites/{site_id}/visitors")
 def visitor_stats(site_id: str, days: int = 14, user=Depends(current_user)):
     """New vs returning visitors per day (UTC) — the base for personalization rules."""
@@ -773,7 +815,32 @@ class CampaignIn(BaseModel):
     segment_id: str = ""        # a saved audience; when set, the segment's rules replace `rules` in the SDK config
     goal_id: str = ""           # optional saved goal: conversions after seeing this campaign are counted for it
     goal: Optional[Goal] = None
+    # schedule (UTC, ISO 8601; empty = no limit) and frequency limits
+    start_at: str = Field(default="", max_length=40)
+    end_at: str = Field(default="", max_length=40)
+    max_views: int = Field(default=0, ge=0, le=1000)                 # at most N showings per visitor (0 = no limit)
+    cooldown_hours: int = Field(default=0, ge=0, le=24 * 365)        # wait this long between showings (0 = none)
+    holdout_pct: int = Field(default=0, ge=0, le=50)                 # % of matching visitors kept as an untouched control group
+    priority: int = Field(default=0, ge=0, le=100)                   # higher wins when several overlays compete for a page
     actions: list[Action]
+
+
+def parse_when(v: str):
+    """ISO 8601 ('2026-10-20T09:30:00Z' or with an offset) -> aware UTC datetime; '' -> None; raises 422 on junk."""
+    v = (v or "").strip()
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(422, "dates must look like 2026-10-20T09:30:00Z")
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def validate_schedule(start_at: str, end_at: str) -> None:
+    a, b = parse_when(start_at), parse_when(end_at)
+    if a and b and b <= a:
+        raise HTTPException(422, "the end must be after the start")
 
 
 TRIGGERS = {"load", "session_start", "delay", "scroll", "exit", "click", "form", "event"}
@@ -807,6 +874,7 @@ def validate_campaign(c: CampaignIn):
     if c.page_match in {"starts", "equals"} and not c.url_contains.strip():
         raise HTTPException(422, "enter the page address")
     validate_trigger(c.trigger_type, c.trigger_value)
+    validate_schedule(c.start_at, c.end_at)
     for a in c.actions:
         if a.type not in {"banner", "popup", "change", "custom", "redirect"}:
             raise HTTPException(422, f"unknown action type {a.type}")
@@ -844,20 +912,66 @@ def validate_campaign(c: CampaignIn):
             raise HTTPException(422, "align must be left/center/right and size small/medium/large")
 
 
+def schedule_state(cfg: dict, now: datetime) -> Optional[str]:
+    """None while inside the schedule window, else 'scheduled' (not started yet) or 'ended'."""
+    a, b = parse_when(cfg.get("start_at", "")), parse_when(cfg.get("end_at", ""))
+    if a and now < a:
+        return "scheduled"
+    if b and now > b:
+        return "ended"
+    return None
+
+
+def compute_campaign_results(rows, imp_rows, conv_rows, first_rows) -> dict:
+    """Control-group (holdout) results: visitors who were eligible but deliberately NOT shown the campaign vs visitors who were shown it,
+    compared on the campaign's conversion goal. Returns {campaign_id: result} for campaigns that have a holdout and a goal."""
+    imp, conv, first = {}, {}, {x["exp_id"]: x["t"] for x in first_rows}
+    for x in imp_rows:
+        imp.setdefault(x["exp_id"], {})[x["variant"]] = x["n"]
+    for x in conv_rows:
+        conv.setdefault(x["exp_id"], {})[x["variant"]] = x["n"]
+    out = {}
+    for r in rows:
+        cfg = json.loads(r["config"])
+        h = cfg.get("holdout_pct") or 0
+        if h <= 0 or not cfg.get("goal"):
+            continue
+        ev = evaluate([{"variant": "control", "visitors": imp.get(r["id"], {}).get("control", 0), "conversions": conv.get(r["id"], {}).get("control", 0)},
+                       {"variant": "shown", "visitors": imp.get(r["id"], {}).get("shown", 0), "conversions": conv.get(r["id"], {}).get("shown", 0)}],
+                      {"control": h, "shown": 100 - h}, "control", min_visitors=30,
+                      runtime_days=((time.time() - first[r["id"]]) / 86400) if first.get(r["id"]) else 0.0, min_days=0)
+        shown = next(v for v in ev["variants"] if v["variant"] == "shown")
+        out[r["id"]] = {"holdout_pct": h, "variants": ev["variants"], "srm": ev["srm"], "recommendation": ev["recommendation"],
+                        "uplift": shown["uplift"], "significant": shown["significant"], "prob_beat_control": shown["prob_beat_control"],
+                        "needed_per_variant": ev["needed_per_variant"]}
+    return out
+
+
 @app.get("/api/sites/{site_id}/campaigns")
 def list_campaigns(site_id: str, user=Depends(current_user)):
     with db() as con:
         owned_site(con, site_id, user)
-        camp_c, cnt_c = con.multi([
+        mine = "exp_id IN (SELECT id FROM campaigns WHERE site_id=?)"
+        camp_c, cnt_c, imp_c, conv_c, first_c = con.multi([
             ("SELECT * FROM campaigns WHERE site_id=? ORDER BY created DESC", (site_id,)),
-            ("SELECT exp_id, type, COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type IN ('impression','click','goal') "
-             "AND exp_id IN (SELECT id FROM campaigns WHERE site_id=?) GROUP BY exp_id, type", (site_id, site_id)),
+            (f"SELECT exp_id, type, COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type IN ('impression','click','goal') AND {mine} GROUP BY exp_id, type", (site_id, site_id)),
+            (f"SELECT exp_id, variant, COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type='impression' AND variant IN ('shown','control') AND {mine} GROUP BY exp_id, variant", (site_id, site_id)),
+            (f"SELECT g.exp_id, g.variant, COUNT(DISTINCT g.visitor_id) n FROM events g WHERE g.site_id=? AND g.type='goal' AND g.variant IN ('shown','control') AND g.{mine} AND EXISTS ("
+             "SELECT 1 FROM events x WHERE x.exp_id=g.exp_id AND x.type='impression' AND x.visitor_id=g.visitor_id AND x.variant=g.variant) GROUP BY g.exp_id, g.variant", (site_id, site_id)),
+            (f"SELECT exp_id, MIN(ts) t FROM events WHERE site_id=? AND type='impression' AND {mine} GROUP BY exp_id", (site_id, site_id)),
         ])
         rows = camp_c.fetchall()
         counts = {(r["exp_id"], r["type"]): r["n"] for r in cnt_c.fetchall()}
-    return [{"id": r["id"], "name": r["name"], "status": r["status"], "config": json.loads(r["config"]),
-             "impressions": counts.get((r["id"], "impression"), 0), "clicks": counts.get((r["id"], "click"), 0),
-             "conversions": counts.get((r["id"], "goal"), 0)} for r in rows]
+        results = compute_campaign_results(rows, imp_c.fetchall(), conv_c.fetchall(), first_c.fetchall())
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        cfg = json.loads(r["config"])
+        out.append({"id": r["id"], "name": r["name"], "status": r["status"], "config": cfg,
+                    "schedule_state": schedule_state(cfg, now) if r["status"] == "running" else None,
+                    "impressions": counts.get((r["id"], "impression"), 0), "clicks": counts.get((r["id"], "click"), 0),
+                    "conversions": counts.get((r["id"], "goal"), 0), "control_results": results.get(r["id"])})
+    return out
 
 
 @app.post("/api/sites/{site_id}/campaigns")
@@ -897,7 +1011,7 @@ def set_campaign_status(cid: str, body: StatusIn, user=Depends(current_user)):
 def visitor_context(request: Request):
     """Per-request context the cached config can't carry: country / state / city from the host's geo headers
     (Vercel, Cloudflare). Null values when running locally or when the host doesn't send them. No IP is read or stored."""
-    return JSONResponse(location_from_headers(request.headers), headers={"Cache-Control": "no-store"})
+    return JSONResponse({**location_from_headers(request.headers), "ip": client_ip(request)}, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- public (SDK-facing)
@@ -923,10 +1037,13 @@ def sdk_config(site_id: str):
             cfg["rules"], cfg["match"] = seg["rules"], seg["match"]
         return cfg
 
+    now_utc = datetime.now(timezone.utc)
     exps = []
     for r in rows:
         cfg = json.loads(r["config"])
         cfg["id"] = r["id"]
+        if r["status"] == "running" and schedule_state(cfg, now_utc):
+            continue                             # outside its start / end window
         if r["status"] == "completed":
             # a finished test keeps serving its winning version to everyone, but only if the owner asked for that
             win = cfg.get("winner")
@@ -939,8 +1056,10 @@ def sdk_config(site_id: str):
     for r in crows:
         cfg = json.loads(r["config"])
         cfg["id"] = r["id"]
+        if schedule_state(cfg, now_utc):
+            continue
         camps.append(with_audience(cfg))
-    goals = [{k: g[k] for k in ("id", "type", "selector", "url_contains", "event_name", "form_name", "value", "count_mode")} for g in grows]
+    goals = [{k: g[k] for k in ("id", "name", "type", "selector", "url_contains", "event_name", "form_name", "value", "count_mode")} for g in grows]
     # Cached ~20s at the CDN (s-maxage) so a busy site doesn't hit the function/database on every pageview,
     # yet dashboard changes show up on the site within about half a minute.
     return JSONResponse({"site": site_id, "settings": site_settings(site_row), "experiments": exps, "campaigns": camps, "goals": goals},

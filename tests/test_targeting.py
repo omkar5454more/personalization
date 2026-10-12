@@ -109,6 +109,8 @@ def test_region_names_and_header_parsing():
 
 def test_ctx_endpoint_reads_host_geo_headers(client):
     r = client.get("/ctx", headers={"x-vercel-ip-country": "IN", "x-vercel-ip-country-region": "KA", "x-vercel-ip-city": "Bengaluru"})
-    assert r.json() == {"country": "IN", "region": "Karnataka", "region_code": "KA", "city": "Bengaluru"}
+    j = r.json()
+    assert {k: j[k] for k in ("country", "region", "region_code", "city")} == {"country": "IN", "region": "Karnataka", "region_code": "KA", "city": "Bengaluru"}
+    assert "ip" in j                                       # the visitor's own address, for IP-range rules (never stored)
     assert r.headers["cache-control"] == "no-store"
     assert client.get("/ctx").json()["city"] is None

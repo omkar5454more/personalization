@@ -181,6 +181,21 @@ def build_router(db, current_user, owned_site, new_id) -> APIRouter:
 
     @r.get("/goals/report")
     def goals_report(site_id: str, days: int = 30, user=Depends(current_user)):
+        return _goals_report(site_id, days, user)
+
+    @r.get("/goals/report.csv")
+    def goals_report_csv(site_id: str, days: int = 30, user=Depends(current_user)):
+        from fastapi.responses import Response
+        import csv, io
+        rep = _goals_report(site_id, days, user)
+        buf = io.StringIO(); w = csv.writer(buf)
+        w.writerow(["goal", "type", "conversions", "people", "rate", "value", "once_or_every"])
+        for g in rep["goals"]:
+            name = ("'" + g["name"]) if g["name"][:1] in ("=", "+", "-", "@") else g["name"]
+            w.writerow([name, g["type"], g["conversions"], g["converters"], round(g["rate"], 6), g["value"], g["count_mode"]])
+        return Response(buf.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="goals-{site_id}.csv"'})
+
+    def _goals_report(site_id: str, days: int, user):
         """Per goal: conversions, converting visitors, rate, value, daily trend and what the converters had been shown."""
         days = max(1, min(int(days), 90))
         since = time.time() - days * 86400

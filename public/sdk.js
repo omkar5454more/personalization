@@ -77,6 +77,7 @@
   else if (now - st.last > SESSION_GAP_MS) { st.sid = rid(); st.visits = (st.visits || 1) + 1; }
   st.assign = st.assign || {}; st.goals = st.goals || {}; st.utm = st.utm || {}; st.pers = st.pers || {};
   st.attrs = st.attrs || {}; st.done = st.done || {}; st.gdone = st.gdone || {};
+  st.cnt = st.cnt || {}; st.lastShown = st.lastShown || {}; st.hold = st.hold || {}; st.cgoal = st.cgoal || {};
   var daysSinceLast = returning ? Math.floor((now - st.last) / 86400000) : 0;
   st.last = now;
 
@@ -110,6 +111,18 @@
     if (navigator.sendBeacon && navigator.sendBeacon(url, body)) return;
     try { fetch(url, { method: "POST", body: body, keepalive: true }); } catch (e) {}
   }
+
+  // ---------------------------------------------------------------- analytics bridge (site setting "Send events to Google Analytics")
+  function analytics(name, data) {
+    if (!settings.ga_events) return;
+    try {
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({ event: name }, data));
+      if (typeof window.gtag === "function") window.gtag("event", name, data);
+    } catch (e) {}
+  }
+  var forced = "";   // QA link: ?ot_force=<campaign id> shows that campaign regardless of rules, frequency and triggers (nothing is tracked)
+  try { forced = new URLSearchParams(location.search).get("ot_force") || ""; } catch (e) {}
 
   // ---------------------------------------------------------------- A/B testing
   function hash(str) { // FNV-1a
@@ -158,15 +171,20 @@
     if (st.goals[exp.id]) return; // one conversion per visitor per test
     st.goals[exp.id] = 1; saveState(st);
     push({ type: "goal", exp: exp.id, variant: variantKey, name: exp.goal.type });
+    analytics("optimize_goal", { optimize_id: exp.id, optimize_name: exp.name, optimize_variant: variantKey });
   }
+  var watched = {};
   function watchGoal(exp, variantKey) {
-    var g = exp.goal;
+    var wk = exp.id + ":" + variantKey, g = exp.goal;
+    if (g.type === "pageview" && g.url_contains) {         // checked on every page (single-page apps change the address without reloading)
+      if (location.href.indexOf(g.url_contains) !== -1) fireGoal(exp, variantKey);
+      return;
+    }
+    if (watched[wk]) return; watched[wk] = 1;              // click / event / form listeners are added only once
     if (g.type === "click" && g.selector) {
       document.addEventListener("click", function (ev) {
         try { if (ev.target.closest && ev.target.closest(g.selector)) fireGoal(exp, variantKey); } catch (e) {}
       }, true);
-    } else if (g.type === "pageview" && g.url_contains) {
-      if (location.href.indexOf(g.url_contains) !== -1) fireGoal(exp, variantKey);
     } else if (g.type === "event" && g.name) {
       window.addEventListener("ot:event:" + g.name, function () { fireGoal(exp, variantKey); });
     } else if (g.type === "form" && g.form_name) {
@@ -195,6 +213,7 @@
       var v = assign(exp);
       if (!v) return;
       push({ type: "exposure", exp: exp.id, variant: v.key });
+      analytics("optimize_test_exposure", { optimize_id: exp.id, optimize_name: exp.name, optimize_variant: v.key });
       watchGoal(exp, v.key);
       if (v.redirect_url && location.href.indexOf(v.redirect_url) === -1) {
         flush(); redirecting = true; location.replace(v.redirect_url); return;
@@ -258,7 +277,7 @@
       utm_source: st.utm.utm_source || "", utm_medium: st.utm.utm_medium || "",
       utm_campaign: st.utm.utm_campaign || "", utm_term: st.utm.utm_term || "", utm_content: st.utm.utm_content || "",
       device: deviceType(), os: osName(), browser: browserName(), language: (navigator.language || "").slice(0, 2).toLowerCase(),
-      country: (geo.country || "").toUpperCase(), region: geo.region || "", city: geo.city || "", hour: d.getHours(), weekday: d.getDay(),
+      country: (geo.country || "").toUpperCase(), region: geo.region || "", city: geo.city || "", ip: geo.ip || "", hour: d.getHours(), weekday: d.getDay(),
       traffic_source: st.vsrc || "direct", total_pageviews: st.tp || 1,
       url: location.href, referrer: st.ref || document.referrer || "", referrer_host: refHost(),
       search_keyword: st.kw || "", landing_page: st.landing || pageUrl(), pages_viewed: st.pvN || 1,
@@ -267,7 +286,37 @@
     Object.keys(st.attrs).forEach(function (k) { c["attr." + k] = String(st.attrs[k]); });
     return c;
   }
+  function ipToInt(ip) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip));
+    if (!m) return null;
+    var n = 0;
+    for (var i = 1; i <= 4; i++) { var o = +m[i]; if (o > 255) return null; n = n * 256 + o; }
+    return n;
+  }
+  // value = comma separated: a single address, a range a.b.c.d-e.f.g.h, or a CIDR block a.b.c.d/24 (IPv4; IPv6 only as an exact address)
+  function ipMatches(actual, want) {
+    var a = ipToInt(actual);
+    return String(want).split(",").some(function (e) {
+      e = e.trim(); if (!e) return false;
+      if (e.indexOf("/") !== -1) {
+        var p = e.split("/"), base = ipToInt(p[0]), bits = +p[1];
+        if (a === null || base === null || isNaN(bits) || bits < 0 || bits > 32) return false;
+        var size = Math.pow(2, 32 - bits), start = Math.floor(base / size) * size;
+        return a >= start && a < start + size;
+      }
+      if (e.indexOf("-") !== -1 && e.indexOf(":") === -1) {
+        var q = e.split("-"), lo = ipToInt(q[0].trim()), hi = ipToInt(q[1].trim());
+        return a !== null && lo !== null && hi !== null && a >= lo && a <= hi;
+      }
+      return String(actual).toLowerCase() === e.toLowerCase();
+    });
+  }
   function ruleMatches(r, ctx) {
+    if (r.field === "ip") {
+      if (!ctx.ip) return false;                       // address unknown: never guess
+      var hit = ipMatches(ctx.ip, r.value);
+      return r.op === "neq" ? !hit : hit;
+    }
     if (r.field === "did_event") {   // "has the visitor ever fired this custom event (e.g. purchase)?"
       var did = (st.done[r.value] || 0) > 0;
       return r.op === "neq" ? !did : did;
@@ -331,12 +380,15 @@
     return c.match === "any" ? c.rules.some(test) : c.rules.every(test);
   }
   function frequencyAllows(c) {
-    if (c.frequency === "once") return !st.pers[c.id];
-    if (c.frequency === "session") return st.pers[c.id] !== st.sid;
+    if (c.frequency === "once" && st.pers[c.id]) return false;
+    if (c.frequency === "session" && st.pers[c.id] === st.sid) return false;
+    if (c.max_views && (st.cnt[c.id] || 0) >= c.max_views) return false;                                    // "at most N times"
+    if (c.cooldown_hours && st.lastShown[c.id] && Date.now() - st.lastShown[c.id] < c.cooldown_hours * 3600000) return false;   // "wait H hours"
     return true;
   }
   function markShown(c) {
     st.pers[c.id] = c.frequency === "session" ? st.sid : 1;
+    st.cnt[c.id] = (st.cnt[c.id] || 0) + 1; st.lastShown[c.id] = Date.now();
     saveState(st);
   }
   function el(tag, css, text) {
@@ -523,7 +575,22 @@
   // "When it shows" for a whole campaign: each page view (default) | first page of a visit | after N seconds | scroll % |
   // exit intent | a click on an element | a form submit | a custom event. Deferred triggers re-check the audience and
   // frequency at the moment they fire, and are armed once per campaign per page load.
-  var lastGeo = null, trigBound = {};
+  var lastGeo = null, trigBound = {}, overlayTaken = false;
+  // one banner / popup at a time per page (site setting): the first campaign to claim it wins; campaigns are tried in priority order
+  function claimOverlay(c) {
+    if (c.id === forced || settings.one_overlay === false) return true;
+    if (overlayTaken) return false;
+    overlayTaken = true; return true;
+  }
+  // control group: eligible visitors who are deliberately NOT shown the campaign (stable per visitor); counted as exposed so the real effect can be measured
+  function inHoldout(c) { return c.holdout_pct > 0 && hash(visitor.id + ":hold:" + c.id) % 100 < c.holdout_pct; }
+  function holdOut(c) {
+    if (st.hold[c.id]) return;
+    st.hold[c.id] = 1; st.cgoal[c.id] = "control"; saveState(st);
+    push({ type: "impression", exp: c.id, variant: "control" });
+    analytics("optimize_campaign_control", { optimize_id: c.id, optimize_name: c.name });
+    if (c.goal) watchGoal(c, "control");
+  }
   function armCampaignTrigger(c, go) {
     var t = c.trigger_type || "load", v = String(c.trigger_value || "");
     if (t === "load") return go();
@@ -552,12 +619,14 @@
     } else if (t === "event") window.addEventListener("ot:event:" + v, guarded);
   }
   var armedCustom = {};
-  function runCampaign(c) {
+  function runCampaign(c, force) {
     var announced = false;
     function announce() {  // counted (and frequency-capped) only when something is actually shown
       if (announced) return; announced = true;
+      if (force) return;                      // QA preview: show it, record nothing
       markShown(c); push({ type: "impression", exp: c.id, variant: "shown" });
-      if (c.goal) watchGoal(c, "shown");     // conversion on the campaign's chosen goal, counted after it was shown
+      analytics("optimize_campaign_shown", { optimize_id: c.id, optimize_name: c.name });
+      if (c.goal) { st.cgoal[c.id] = "shown"; saveState(st); watchGoal(c, "shown"); }   // conversion on the campaign's goal, counted after it was shown
     }
     var deferred = !!c.trigger_type && c.trigger_type !== "load";
     function go() {
@@ -566,7 +635,12 @@
           var key = c.id + ":" + i;
           if (armedCustom[key]) return; armedCustom[key] = 1;
           // the campaign-level trigger replaces the code action's own trigger
-          onBody(function () { armTrigger(deferred ? { trigger: "load" } : a, function () { renderCustom(c, a, announce); }); });
+          onBody(function () {
+            armTrigger(deferred && !force ? { trigger: "load" } : (force ? { trigger: "load" } : a), function () {
+              if (a.display !== "inline" && !claimOverlay(c)) return;
+              renderCustom(c, a, announce);
+            });
+          });
           return;
         }
         if (a.type === "redirect") {
@@ -579,11 +653,18 @@
           announce(); saveState(st); flush(); location.replace(abs);
           return;
         }
+        if ((a.type === "banner" || a.type === "popup") && !claimOverlay(c)) return;
         announce();
         if (a.type === "banner") showBanner(c, a);
         else if (a.type === "popup") showPopup(c, a);
         else if (a.type === "change") applyWithRetry([{ selector: a.selector, action: a.action, value: a.value, attr: a.attr }]);
       });
+    }
+    if (force) {
+      var ribbon = el("div", "position:fixed;left:50%;bottom:0;transform:translateX(-50%);z-index:2147483647;background:#111827;color:#fff;padding:5px 12px;border-radius:10px 10px 0 0;font:12px/1.4 system-ui,sans-serif");
+      ribbon.setAttribute("data-ot-ignore", "1"); ribbon.textContent = "Optimize QA preview: " + (c.name || c.id) + " (nothing is tracked)";
+      document.body.appendChild(ribbon);
+      return go();
     }
     armCampaignTrigger(c, go);
   }
@@ -593,7 +674,7 @@
   var geoPromise = null;
   function getContext(cfg) {
     var all = ((cfg && cfg.campaigns) || []).concat((cfg && cfg.experiments) || []);
-    var geoField = function (r) { return r.field === "country" || r.field === "region" || r.field === "city" || (r.field === "__group" && (r.rules || []).some(geoField)); };
+    var geoField = function (r) { return r.field === "country" || r.field === "region" || r.field === "city" || r.field === "ip" || (r.field === "__group" && (r.rules || []).some(geoField)); };
     var needsGeo = all.some(function (c) { return (c.rules || []).some(geoField); });
     if (!needsGeo) return Promise.resolve(context(lastGeo));
     if (!geoPromise) {
@@ -602,8 +683,13 @@
     return geoPromise.then(function (geo) { lastGeo = geo; return context(geo); });
   }
   function runCampaigns(list, ctx) {
-    (list || []).forEach(function (c) {
-      if (campaignMatches(c, ctx) && frequencyAllows(c)) onBody(function () { runCampaign(c); });
+    (list || []).slice().sort(function (a, b) { return (b.priority || 0) - (a.priority || 0); }).forEach(function (c) {
+      if (c.goal && st.cgoal[c.id]) watchGoal(c, st.cgoal[c.id]);        // the goal may be reached on a different page than the campaign
+      if (forced && c.id === forced) { onBody(function () { runCampaign(c, true); }); return; }
+      if (forced) return;                                                  // a QA link shows only that campaign
+      if (!campaignMatches(c, ctx)) return;
+      if (inHoldout(c)) { holdOut(c); return; }
+      if (frequencyAllows(c)) onBody(function () { runCampaign(c); });
     });
   }
 
@@ -615,6 +701,7 @@
     if (g.count_mode !== "every" && n) return;
     st.gdone[g.id] = n + 1; saveState(st);
     push({ type: "conversion", name: g.id, props: { value: g.value || 0 } });
+    analytics("optimize_goal", { optimize_goal_id: g.id, optimize_goal: g.name, value: g.value || 0 });
     flush();
   }
   function checkPageGoals() {
@@ -753,6 +840,7 @@
   function routeChanged() {
     if (!active || pageUrl() === curUrl) return;
     newPage(false);
+    overlayTaken = false;                       // a new page of a single-page app may show its own banner / popup
     if (cfgCache) {
       getContext(cfgCache).then(function (ctx) { runCampaigns(cfgCache.campaigns, ctx); });  // experiments are evaluated on full page loads only
       checkPageGoals();
