@@ -25,6 +25,7 @@ from backend.database import ROOT, DatabaseError, db
 from backend.rules import Rule, RULE_FIELDS, RULE_OPS, clean_rules, validate_rules  # noqa: F401
 from backend.stats import evaluate, z_test_p
 from backend.geo import location_from_headers
+from backend import perf
 from backend.audiences import build_router as build_audiences_router, goal_as_test_goal, goal_row
 
 PUBLIC = ROOT / "public"      # static site: dashboard, SDK scripts, demo (served by Vercel's CDN in production)
@@ -241,15 +242,19 @@ def current_user(request: Request) -> Any:
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         raise HTTPException(401, "not logged in")
+    th = hashlib.sha256(token.encode()).hexdigest()
+    hit = perf.sessions.get(th)          # saves a database round trip on every dashboard call (cached ~15 s per warm instance)
+    if hit is not None:
+        return hit
     with db() as con:
         row = con.execute(
             "SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id "
             "WHERE s.token_hash=? AND s.created>?",
-            (hashlib.sha256(token.encode()).hexdigest(), time.time() - SESSION_TTL),
+            (th, time.time() - SESSION_TTL),
         ).fetchone()
     if not row:
         raise HTTPException(401, "session expired")
-    return row
+    return perf.sessions.set(th, row)
 
 
 @app.post("/api/auth/register")
@@ -290,6 +295,7 @@ def login(body: Creds, request: Request, response: Response):
 def logout(request: Request, response: Response):
     token = request.cookies.get(SESSION_COOKIE)
     if token:
+        perf.sessions.pop(hashlib.sha256(token.encode()).hexdigest())
         with db() as con:
             con.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.encode()).hexdigest(),))
     response.delete_cookie(SESSION_COOKIE, path="/", secure=COOKIE_SECURE, httponly=True, samesite="lax")
@@ -301,10 +307,16 @@ def me(user=Depends(current_user)):
     return {"email": user["email"]}
 
 
-def owned_site(con, site_id: str, user) -> Any:
+def owned_site(con, site_id: str, user, fresh: bool = False) -> Any:
+    """404 unless the signed-in user owns the site. A positive answer is remembered for ~20 s per warm instance (one database
+    round trip saved per call); `fresh=True` always reads the row (use it when you need the row's fields)."""
+    key = (user["id"], site_id)
+    if not fresh and perf.access.get(key):
+        return {"id": site_id}
     row = con.execute("SELECT * FROM sites WHERE id=? AND user_id=?", (site_id, user["id"])).fetchone()
     if not row:  # same answer for "missing" and "someone else's" -- don't leak existence
         raise HTTPException(404, "site not found")
+    perf.access.set(key, "owner")
     return row
 
 
@@ -327,27 +339,51 @@ def owned_campaign(con, cid: str, user) -> Any:
 
 
 # ---------------------------------------------------------------- dashboard API
+def sites_summary(user) -> list:
+    """Every site of the user with its connection status, 7-day traffic and running tests/campaigns -- in ONE database round trip."""
+    hit = perf.sites_summary.get(user["id"])
+    if hit is not None:
+        return hit
+    now, uid = time.time(), user["id"]
+    week = now - 7 * 86400
+    with db() as con:
+        sites_c, ev_c, ex_c, cm_c = con.multi([
+            ("SELECT * FROM sites WHERE user_id=? ORDER BY created DESC", (uid,)),
+            ("SELECT s.id site_id, (SELECT MAX(e.ts) FROM events e WHERE e.site_id=s.id) last, "
+             "(SELECT COUNT(DISTINCT e.visitor_id) FROM events e WHERE e.site_id=s.id AND e.type='pageview' AND e.ts>=?) v7, "
+             "(SELECT COUNT(*) FROM events e WHERE e.site_id=s.id AND e.type='pageview' AND e.ts>=?) pv7 "
+             "FROM sites s WHERE s.user_id=?", (week, week, uid)),
+            ("SELECT site_id, status, COUNT(*) n FROM experiments WHERE site_id IN (SELECT id FROM sites WHERE user_id=?) GROUP BY site_id, status", (uid,)),
+            ("SELECT site_id, status, COUNT(*) n FROM campaigns WHERE site_id IN (SELECT id FROM sites WHERE user_id=?) GROUP BY site_id, status", (uid,)),
+        ])
+        rows, ev = sites_c.fetchall(), {r["site_id"]: r for r in ev_c.fetchall()}
+        exps, camps = {}, {}
+        for r in ex_c.fetchall():
+            exps.setdefault(r["site_id"], {})[r["status"]] = r["n"]
+        for r in cm_c.fetchall():
+            camps.setdefault(r["site_id"], {})[r["status"]] = r["n"]
+    out = []
+    for r in rows:
+        e = ev.get(r["id"])
+        last = e["last"] if e else None
+        status = ("waiting" if not last else "live" if now - last < 600 else "receiving" if now - last < 86400 else "idle")
+        out.append({
+            "id": r["id"], "name": r["name"], "domain": r["domain"] or "", "created": r["created"],
+            "status": status, "last_event": last, "visitors_7d": (e["v7"] if e else 0) or 0, "pageviews_7d": (e["pv7"] if e else 0) or 0,
+            "experiments": exps.get(r["id"], {}), "campaigns": camps.get(r["id"], {}),
+        })
+    return perf.sites_summary.set(uid, out)
+
+
 @app.get("/api/sites")
 def list_sites(user=Depends(current_user)):
-    now = time.time()
-    out = []
-    with db() as con:
-        for r in con.execute("SELECT * FROM sites WHERE user_id=? ORDER BY created DESC", (user["id"],)).fetchall():
-            ev = con.execute(
-                "SELECT MAX(ts) last, COUNT(DISTINCT CASE WHEN type='pageview' AND ts>=? THEN visitor_id END) v7, "
-                "SUM(type='pageview' AND ts>=?) pv7 FROM events WHERE site_id=?",
-                (now - 7 * 86400, now - 7 * 86400, r["id"])).fetchone()
-            exps = con.execute("SELECT status, COUNT(*) n FROM experiments WHERE site_id=? GROUP BY status", (r["id"],)).fetchall()
-            camps = con.execute("SELECT status, COUNT(*) n FROM campaigns WHERE site_id=? GROUP BY status", (r["id"],)).fetchall()
-            last = ev["last"]
-            status = ("waiting" if not last else "live" if now - last < 600 else
-                      "receiving" if now - last < 86400 else "idle")
-            out.append({
-                "id": r["id"], "name": r["name"], "domain": r["domain"] or "", "created": r["created"],
-                "status": status, "last_event": last, "visitors_7d": ev["v7"] or 0, "pageviews_7d": ev["pv7"] or 0,
-                "experiments": {x["status"]: x["n"] for x in exps}, "campaigns": {x["status"]: x["n"] for x in camps},
-            })
-    return out
+    return sites_summary(user)
+
+
+@app.get("/api/bootstrap")
+def bootstrap(user=Depends(current_user)):
+    """Everything the dashboard needs to paint its first screen, in one request."""
+    return {"user": {"email": user["email"]}, "sites": sites_summary(user)}
 
 
 @app.post("/api/sites")
@@ -357,6 +393,7 @@ def create_site(body: SiteIn, user=Depends(current_user)):
     with db() as con:
         con.execute("INSERT INTO sites (id,name,domain,created,user_id,settings) VALUES (?,?,?,?,?,?)",
                     (sid, body.name, domain, time.time(), user["id"], json.dumps(DEFAULT_SETTINGS)))
+    perf.sites_summary.pop(user["id"])
     return {"id": sid, "name": body.name, "domain": domain}
 
 
@@ -495,20 +532,21 @@ def create_demo_site(request: Request, user=Depends(current_user)):
                       (new_id("seg"), sid, "Returning visitors on mobile", "People who have been here before, on a phone.", "all",
                        json.dumps([{"field": "returning", "op": "eq", "value": "true"}, {"field": "device", "op": "eq", "value": "mobile"}]), now)))
         con.batch(stmts)
+    perf.sites_summary.pop(user["id"])
     return {"id": sid, "created": True, "demo_url": f"/site-demo?site={sid}"}
 
 
 @app.get("/api/sites/{site_id}")
 def get_site_detail(site_id: str, user=Depends(current_user)):
     with db() as con:
-        r = owned_site(con, site_id, user)
+        r = owned_site(con, site_id, user, fresh=True)
         return {"id": r["id"], "name": r["name"], "domain": r["domain"] or "", "settings": site_settings(r)}
 
 
 @app.patch("/api/sites/{site_id}")
 def patch_site(site_id: str, body: SitePatch, user=Depends(current_user)):
     with db() as con:
-        r = owned_site(con, site_id, user)
+        r = owned_site(con, site_id, user, fresh=True)
         name = body.name if body.name is not None else r["name"]
         domain = clean_domain(body.domain) if body.domain is not None else (r["domain"] or "")
         settings = site_settings(r)
@@ -516,20 +554,27 @@ def patch_site(site_id: str, body: SitePatch, user=Depends(current_user)):
             settings.update({k: v for k, v in body.settings.items() if k in DEFAULT_SETTINGS})
         con.execute("UPDATE sites SET name=?, domain=?, settings=? WHERE id=?",
                     (name, domain, json.dumps(settings), site_id))
+    perf.site_cfg.pop(site_id)
+    perf.sites_summary.pop(user["id"])
     return {"id": site_id, "name": name, "domain": domain, "settings": settings}
 
 
 @app.get("/api/sites/{site_id}/experiments")
-def list_experiments(site_id: str, user=Depends(current_user)):
+def list_experiments(site_id: str, with_results: bool = False, user=Depends(current_user)):
     with db() as con:
         owned_site(con, site_id, user)
         rows = con.execute(
             "SELECT * FROM experiments WHERE site_id=? ORDER BY created DESC", (site_id,)
         ).fetchall()
-    return [
-        {"id": r["id"], "name": r["name"], "status": r["status"], "config": json.loads(r["config"])}
-        for r in rows
-    ]
+        results_by_id = compute_experiment_results(con, rows) if with_results else {}
+    out = []
+    for r in rows:
+        item = {"id": r["id"], "name": r["name"], "status": r["status"], "config": json.loads(r["config"])}
+        if with_results:
+            item["results"] = results_by_id.get(r["id"])
+            item["status"] = item["results"]["status"] if item["results"] else item["status"]
+        out.append(item)
+    return out
 
 
 @app.post("/api/sites/{site_id}/experiments")
@@ -573,6 +618,7 @@ def set_status(exp_id: str, body: StatusIn, user=Depends(current_user)):
     with db() as con:
         owned_experiment(con, exp_id, user)
         con.execute("UPDATE experiments SET status=? WHERE id=?", (body.status, exp_id))
+    perf.sites_summary.pop(user["id"])
     return {"id": exp_id, "status": body.status}
 
 
@@ -580,69 +626,84 @@ def _z_test(n_a: int, c_a: int, n_b: int, c_b: int) -> Optional[float]:   # kept
     return z_test_p(n_a, c_a, n_b, c_b)
 
 
+def compute_experiment_results(con, rows) -> dict:
+    """Results for several tests of ONE site in a handful of grouped queries (was ~5 per test). Returns {exp_id: result}.
+    As a side effect, a running test with auto_winner whose evidence rule is met is completed (see stats.evaluate)."""
+    rows = list(rows)
+    if not rows:
+        return {}
+    ids = [r["id"] for r in rows]
+    ph = ",".join("?" * len(ids))
+    site_id = rows[0]["site_id"]
+    cfgs = {r["id"]: json.loads(r["config"]) for r in rows}
+    sec_ids = sorted({g for c in cfgs.values() for g in c.get("secondary_goal_ids", [])})
+    stmts = [
+        (f"SELECT exp_id, variant, COUNT(DISTINCT visitor_id) n FROM events WHERE exp_id IN ({ph}) AND type='exposure' GROUP BY exp_id, variant", ids),
+        # A conversion only counts for visitors who were exposed to the test.
+        (f"SELECT g.exp_id, g.variant, COUNT(DISTINCT g.visitor_id) n FROM events g WHERE g.exp_id IN ({ph}) AND g.type='goal' AND EXISTS ("
+         "SELECT 1 FROM events x WHERE x.exp_id=g.exp_id AND x.type='exposure' AND x.visitor_id=g.visitor_id AND x.variant=g.variant) "
+         "GROUP BY g.exp_id, g.variant", ids),
+        (f"SELECT exp_id, MIN(ts) t FROM events WHERE exp_id IN ({ph}) AND type='exposure' GROUP BY exp_id", ids),
+    ]
+    if sec_ids:
+        gph = ",".join("?" * len(sec_ids))
+        stmts.append((f"SELECT id, name FROM goals WHERE id IN ({gph})", sec_ids))
+        # Secondary goals: site-wide `conversion` events from visitors AFTER they entered the test.
+        stmts.append((f"SELECT x.exp_id, x.variant, c.name gid, COUNT(DISTINCT x.visitor_id) n FROM "
+                      f"(SELECT exp_id, visitor_id, variant, MIN(ts) t FROM events WHERE exp_id IN ({ph}) AND type='exposure' GROUP BY exp_id, visitor_id, variant) x "
+                      f"JOIN events c ON c.site_id=? AND c.type='conversion' AND c.name IN ({gph}) AND c.visitor_id=x.visitor_id AND c.ts>=x.t "
+                      "GROUP BY x.exp_id, x.variant, c.name", ids + [site_id] + sec_ids))
+    res = con.multi(stmts)
+    exposed, converted, first = {}, {}, {r["exp_id"]: r["t"] for r in res[2].fetchall()}
+    for r in res[0].fetchall():
+        exposed.setdefault(r["exp_id"], {})[r["variant"]] = r["n"]
+    for r in res[1].fetchall():
+        converted.setdefault(r["exp_id"], {})[r["variant"]] = r["n"]
+    gnames = {r["id"]: r["name"] for r in res[3].fetchall()} if sec_ids else {}
+    sconv = {}
+    if sec_ids:
+        for r in res[4].fetchall():
+            sconv.setdefault((r["exp_id"], r["gid"]), {})[r["variant"]] = r["n"]
+
+    out = {}
+    for row in rows:
+        eid, cfg = row["id"], cfgs[row["id"]]
+        ex, cv = exposed.get(eid, {}), converted.get(eid, {})
+        keys = [v["key"] for v in cfg["variants"]]
+        control = keys[0]
+        weights = {v["key"]: max(v.get("weight", 0), 0) for v in cfg["variants"]}
+        runtime_days = ((time.time() - first[eid]) / 86400) if first.get(eid) else 0.0
+        ev = evaluate([{"variant": k, "visitors": ex.get(k, 0), "conversions": cv.get(k, 0)} for k in keys],
+                      weights, control, min_visitors=cfg.get("min_visitors", 0), runtime_days=runtime_days,
+                      min_days=cfg.get("min_days", 0), auto=cfg.get("auto_winner", False))
+        status = row["status"]
+        if status == "running" and ev["auto_ready"]:
+            # The evidence rule is met: end the test and remember the winner (applied lazily, when someone looks at results).
+            cfg["winner"] = ev["winner"]; cfg["completed_reason"] = "auto"; cfg["completed_at"] = time.time()
+            con.execute("UPDATE experiments SET status='completed', config=? WHERE id=?", (json.dumps(cfg), eid))
+            status = "completed"
+            perf.sites_summary.clear()
+        sec = []
+        for gid in cfg.get("secondary_goal_ids", []):
+            conv = sconv.get((eid, gid), {})
+            sec.append({"goal_id": gid, "name": gnames.get(gid, gid), "variants": [
+                {"variant": k, "visitors": ex.get(k, 0), "converters": conv.get(k, 0), "rate": (conv.get(k, 0) / ex[k]) if ex.get(k) else 0.0} for k in keys]})
+        out[eid] = {"id": eid, "name": row["name"], "status": status, "variants": ev["variants"], "srm": ev["srm"],
+                    "alpha": ev["alpha"], "needed_per_variant": ev["needed_per_variant"], "baseline_rate": ev["baseline_rate"],
+                    "enough_data": ev["enough_data"], "winner": cfg.get("winner") or ev["winner"],
+                    "winner_declared": bool(cfg.get("winner")), "completed_reason": cfg.get("completed_reason"),
+                    "recommendation": ev["recommendation"], "runtime_days": runtime_days, "secondary": sec,
+                    "note": "Significance uses a fixed-horizon z-test with a Bonferroni correction when there are several versions; "
+                            "the probability-to-beat-control is Bayesian. Decide your sample size first and avoid stopping at the "
+                            "first lucky reading."}
+    return out
+
+
 @app.get("/api/experiments/{exp_id}/results")
 def results(exp_id: str, user=Depends(current_user)):
     with db() as con:
         row = owned_experiment(con, exp_id, user)
-        cfg = json.loads(row["config"])
-        exposed = {
-            r["variant"]: r["n"]
-            for r in con.execute(
-                "SELECT variant, COUNT(DISTINCT visitor_id) n FROM events "
-                "WHERE exp_id=? AND type='exposure' GROUP BY variant",
-                (exp_id,),
-            )
-        }
-        # A conversion only counts for visitors who were exposed to the test.
-        converted = {
-            r["variant"]: r["n"]
-            for r in con.execute(
-                "SELECT g.variant variant, COUNT(DISTINCT g.visitor_id) n FROM events g "
-                "WHERE g.exp_id=? AND g.type='goal' AND EXISTS ("
-                "  SELECT 1 FROM events x WHERE x.exp_id=g.exp_id AND x.type='exposure' "
-                "  AND x.visitor_id=g.visitor_id AND x.variant=g.variant) "
-                "GROUP BY g.variant",
-                (exp_id,),
-            )
-        }
-        first = con.execute("SELECT MIN(ts) t FROM events WHERE exp_id=? AND type='exposure'", (exp_id,)).fetchone()["t"]
-        # Secondary goals: site-wide `conversion` events from visitors AFTER they entered the test.
-        secondary = []
-        for gid in cfg.get("secondary_goal_ids", []):
-            g = con.execute("SELECT name FROM goals WHERE id=?", (gid,)).fetchone()
-            conv = {r["variant"]: r["n"] for r in con.execute(
-                "SELECT x.variant variant, COUNT(DISTINCT x.visitor_id) n FROM "
-                "(SELECT visitor_id, variant, MIN(ts) t FROM events WHERE exp_id=? AND type='exposure' GROUP BY visitor_id, variant) x "
-                "JOIN events c ON c.site_id=? AND c.type='conversion' AND c.name=? AND c.visitor_id=x.visitor_id AND c.ts>=x.t "
-                "GROUP BY x.variant", (exp_id, row["site_id"], gid))}
-            secondary.append({"goal_id": gid, "name": g["name"] if g else gid, "converters": conv})
-    keys = [v["key"] for v in cfg["variants"]]
-    control = keys[0]
-    weights = {v["key"]: max(v.get("weight", 0), 0) for v in cfg["variants"]}
-    runtime_days = ((time.time() - first) / 86400) if first else 0.0
-    ev = evaluate([{"variant": k, "visitors": exposed.get(k, 0), "conversions": converted.get(k, 0)} for k in keys],
-                  weights, control, min_visitors=cfg.get("min_visitors", 0), runtime_days=runtime_days,
-                  min_days=cfg.get("min_days", 0), auto=cfg.get("auto_winner", False))
-    status = row["status"]
-    if status == "running" and ev["auto_ready"]:
-        # The evidence rule is met: end the test and remember the winner (applied lazily, when someone looks at results).
-        cfg["winner"] = ev["winner"]; cfg["completed_reason"] = "auto"; cfg["completed_at"] = time.time()
-        with db() as con:
-            con.execute("UPDATE experiments SET status='completed', config=? WHERE id=?", (json.dumps(cfg), exp_id))
-        status = "completed"
-    sec = []
-    for sg in secondary:
-        sec.append({"goal_id": sg["goal_id"], "name": sg["name"], "variants": [
-            {"variant": k, "visitors": exposed.get(k, 0), "converters": sg["converters"].get(k, 0),
-             "rate": (sg["converters"].get(k, 0) / exposed[k]) if exposed.get(k) else 0.0} for k in keys]})
-    return {"id": exp_id, "name": row["name"], "status": status, "variants": ev["variants"], "srm": ev["srm"],
-            "alpha": ev["alpha"], "needed_per_variant": ev["needed_per_variant"], "baseline_rate": ev["baseline_rate"],
-            "enough_data": ev["enough_data"], "winner": cfg.get("winner") or ev["winner"],
-            "winner_declared": bool(cfg.get("winner")), "completed_reason": cfg.get("completed_reason"),
-            "recommendation": ev["recommendation"], "runtime_days": runtime_days, "secondary": sec,
-            "note": "Significance uses a fixed-horizon z-test with a Bonferroni correction when there are several versions; "
-                    "the probability-to-beat-control is Bayesian. Decide your sample size first and avoid stopping at the "
-                    "first lucky reading."}
+        return compute_experiment_results(con, [row])[exp_id]
 
 
 @app.get("/api/sites/{site_id}/visitors")
@@ -787,15 +848,16 @@ def validate_campaign(c: CampaignIn):
 def list_campaigns(site_id: str, user=Depends(current_user)):
     with db() as con:
         owned_site(con, site_id, user)
-        rows = con.execute("SELECT * FROM campaigns WHERE site_id=? ORDER BY created DESC", (site_id,)).fetchall()
-        out = []
-        for r in rows:
-            imp = con.execute("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE exp_id=? AND type='impression'", (r["id"],)).fetchone()["n"]
-            clk = con.execute("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE exp_id=? AND type='click'", (r["id"],)).fetchone()["n"]
-            conv = con.execute("SELECT COUNT(DISTINCT visitor_id) n FROM events WHERE exp_id=? AND type='goal'", (r["id"],)).fetchone()["n"]
-            out.append({"id": r["id"], "name": r["name"], "status": r["status"], "config": json.loads(r["config"]),
-                        "impressions": imp, "clicks": clk, "conversions": conv})
-    return out
+        camp_c, cnt_c = con.multi([
+            ("SELECT * FROM campaigns WHERE site_id=? ORDER BY created DESC", (site_id,)),
+            ("SELECT exp_id, type, COUNT(DISTINCT visitor_id) n FROM events WHERE site_id=? AND type IN ('impression','click','goal') "
+             "AND exp_id IN (SELECT id FROM campaigns WHERE site_id=?) GROUP BY exp_id, type", (site_id, site_id)),
+        ])
+        rows = camp_c.fetchall()
+        counts = {(r["exp_id"], r["type"]): r["n"] for r in cnt_c.fetchall()}
+    return [{"id": r["id"], "name": r["name"], "status": r["status"], "config": json.loads(r["config"]),
+             "impressions": counts.get((r["id"], "impression"), 0), "clicks": counts.get((r["id"], "click"), 0),
+             "conversions": counts.get((r["id"], "goal"), 0)} for r in rows]
 
 
 @app.post("/api/sites/{site_id}/campaigns")
@@ -827,6 +889,7 @@ def set_campaign_status(cid: str, body: StatusIn, user=Depends(current_user)):
     with db() as con:
         owned_campaign(con, cid, user)
         con.execute("UPDATE campaigns SET status=? WHERE id=?", (body.status, cid))
+    perf.sites_summary.pop(user["id"])
     return {"id": cid, "status": body.status}
 
 
@@ -931,14 +994,19 @@ async def collect(request: Request):
         raise HTTPException(400, "bad payload")
     host = str(payload.get("host") or "")[:100]
     country = request.headers.get("cf-ipcountry") or request.headers.get("x-vercel-ip-country")
-    with db() as con:
-        site = con.execute("SELECT domain, settings FROM sites WHERE id=?", (site_id,)).fetchone()
+    cfg = perf.site_cfg.get(site_id)       # (domain, settings): cached ~60 s, saves one database round trip per page view
+    if cfg is None:
+        with db() as con:
+            site = con.execute("SELECT domain, settings FROM sites WHERE id=?", (site_id,)).fetchone()
         if not site:
             raise HTTPException(404, "unknown site")
+        cfg = perf.site_cfg.set(site_id, (site["domain"], site_settings(site)))
+    domain, settings = cfg
+    with db() as con:
         # Optional, best-effort abuse guard: drop events whose browser Origin isn't the site's domain.
         # (Anyone can forge the header outside a browser, so this stops casual copy-paste misuse, not attackers.)
         origin = request.headers.get("origin") or ""
-        if origin and site["domain"] and site_settings(site).get("restrict_origin") and not origin_allowed(origin, site["domain"]):
+        if origin and domain and settings.get("restrict_origin") and not origin_allowed(origin, domain):
             return Response(status_code=204)
         now = time.time()
         stmts = []
