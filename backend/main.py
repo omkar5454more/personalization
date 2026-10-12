@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from backend.database import ROOT, DatabaseError, db
 from backend.rules import Rule, RULE_FIELDS, RULE_OPS, clean_rules, validate_rules  # noqa: F401
 from backend.stats import evaluate, z_test_p
+from backend.geo import location_from_headers
 from backend.audiences import build_router as build_audiences_router, goal_as_test_goal, goal_row
 
 PUBLIC = ROOT / "public"      # static site: dashboard, SDK scripts, demo (served by Vercel's CDN in production)
@@ -703,10 +704,33 @@ class CampaignIn(BaseModel):
     match: str = "all"          # all | any
     frequency: str = "once"     # once | session | always
     rules: list[Rule] = []
+    # where it runs: all pages | address starts with | contains | is exactly   (`url_contains` holds the text)
+    page_match: str = "contains"
+    # when it shows: load (each page view) | session_start | delay | scroll | exit | click | form | event
+    trigger_type: str = "load"
+    trigger_value: str = Field(default="", max_length=300)   # seconds / % / CSS selector / form name / event name
     segment_id: str = ""        # a saved audience; when set, the segment's rules replace `rules` in the SDK config
     goal_id: str = ""           # optional saved goal: conversions after seeing this campaign are counted for it
     goal: Optional[Goal] = None
     actions: list[Action]
+
+
+TRIGGERS = {"load", "session_start", "delay", "scroll", "exit", "click", "form", "event"}
+
+
+def validate_trigger(kind: str, value: str) -> None:
+    if kind not in TRIGGERS:
+        raise HTTPException(422, "unknown trigger")
+    v = (value or "").strip()
+    if kind == "delay":
+        if not v.isdigit() or not 0 <= int(v) <= 3600:
+            raise HTTPException(422, "delay needs a number of seconds (0-3600)")
+    elif kind == "scroll":
+        if not v.isdigit() or not 1 <= int(v) <= 100:
+            raise HTTPException(422, "scroll needs a percentage between 1 and 100")
+    elif kind in {"click", "form", "event"} and not v:
+        raise HTTPException(422, {"click": "enter the CSS selector of the element", "form": "enter the form's name",
+                                  "event": "enter the event name"}[kind])
 
 
 def validate_campaign(c: CampaignIn):
@@ -717,9 +741,18 @@ def validate_campaign(c: CampaignIn):
     if c.frequency not in {"once", "session", "always"}:
         raise HTTPException(422, "bad frequency")
     validate_rules(c.rules, c.match)
+    if c.page_match not in {"all", "starts", "contains", "equals"}:
+        raise HTTPException(422, "page_match must be all, starts, contains or equals")
+    if c.page_match in {"starts", "equals"} and not c.url_contains.strip():
+        raise HTTPException(422, "enter the page address")
+    validate_trigger(c.trigger_type, c.trigger_value)
     for a in c.actions:
-        if a.type not in {"banner", "popup", "change", "custom"}:
+        if a.type not in {"banner", "popup", "change", "custom", "redirect"}:
             raise HTTPException(422, f"unknown action type {a.type}")
+        if a.type == "redirect":
+            if not re.match(r"^(https?://[^\s/]\S*|/(?![/\\])\S*)$", a.value.strip()):   # full address, or a single-slash path (no //host)
+                raise HTTPException(422, "redirect needs a full address (https://…) or a path starting with /")
+            continue
         if a.type == "custom":
             if not (a.html.strip() or a.js.strip()):
                 raise HTTPException(422, "custom code needs some HTML or JavaScript")
@@ -799,13 +832,9 @@ def set_campaign_status(cid: str, body: StatusIn, user=Depends(current_user)):
 
 @app.get("/ctx")
 def visitor_context(request: Request):
-    """Per-request context the cached config can't carry. Country comes from the
-    CDN/host's geo header (Cloudflare, Vercel); it is null when running locally."""
-    h = request.headers
-    country = h.get("cf-ipcountry") or h.get("x-vercel-ip-country") or None
-    if country in {"XX", "T1"}:
-        country = None
-    return JSONResponse({"country": country}, headers={"Cache-Control": "no-store"})
+    """Per-request context the cached config can't carry: country / state / city from the host's geo headers
+    (Vercel, Cloudflare). Null values when running locally or when the host doesn't send them. No IP is read or stored."""
+    return JSONResponse(location_from_headers(request.headers), headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- public (SDK-facing)

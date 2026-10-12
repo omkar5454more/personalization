@@ -373,11 +373,15 @@ async function openCampaignModal(site, existing, opts = {}) {
     <div id="c-audience"></div>
     <div class="row" style="margin:12px 0 6px">
       ${sel("c-freq", [["once", "Show once per visitor"], ["session", "Once per visit"], ["always", "Every page load"]], cfg ? cfg.frequency : (type0 === "visual" ? "always" : "once"), 'style="width:190px"')}
-      <input id="c-url" type="text" class="grow" placeholder="Only on URLs containing… (blank = all)" value="${esc(cfg ? cfg.url_contains : "")}"></div>
+      ${sel("c-pagematch", [["contains", "Pages containing"], ["starts", "Pages starting with"], ["equals", "This page only"], ["all", "All pages"]], cfg ? (cfg.page_match || "contains") : "contains", 'style="width:170px"')}
+      <input id="c-url" type="text" class="grow" placeholder="page address, e.g. /pricing or https://site.com/pricing (blank = all pages)" value="${esc(cfg ? cfg.url_contains : "")}"></div>
+    <div class="row" style="margin-bottom:6px"><span class="lbl2">When it shows</span>
+      ${sel("c-trig", [["load", "On each page view"], ["session_start", "When a visit starts (first page of a visit)"], ["delay", "After some time on the page"], ["scroll", "When they scroll down the page"], ["exit", "When they're about to leave (computers)"], ["click", "When they click an element"], ["form", "When they submit a form"], ["event", "When the site sends an event"]], cfg ? (cfg.trigger_type || "load") : "load", 'style="width:310px"')}
+      <input id="c-trigv" type="text" style="width:240px" value="${esc(cfg ? (cfg.trigger_value || "") : "")}"><span class="muted" id="c-trigh" style="font-size:12.5px"></span></div>
     <div class="muted" style="font-size:12.5px;margin-bottom:14px">“Visit number ≥ 3” + “once per visitor” shows the content the first time someone arrives for the 3rd time.</div>
 
     <div class="lbl2" style="margin-bottom:6px">2 · What should they see?</div>
-    <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"]], type0, 'style="max-width:420px"')}</div>
+    <div class="row" style="margin-bottom:10px">${sel("c-type", [["visual", "Change the page — edit text, images, buttons on your real page"], ["banner", "Banner"], ["popup", "Popup"], ["custom", "Custom code (HTML / CSS / JS) — forms, embeds, anything"], ["redirect", "Redirect — send them to another page"]], type0, 'style="max-width:420px"')}</div>
 
     <div id="p-simple" style="display:none">
       <div class="lbl2" style="margin-bottom:4px">Live preview <span class="muted">(updates as you type)</span></div>
@@ -431,6 +435,8 @@ async function openCampaignModal(site, existing, opts = {}) {
         Tip: leave <b>Show</b> on “Every page load” so the edits stay on the page, and set “Only on URLs containing…” (e.g. <code>/index.html</code>) to limit them to this page.</div>
       <div class="lbl2">Changes <span class="muted" id="vz-count"></span></div><div id="vz-list"></div>
     </div>
+    <div id="p-redirect" style="display:none"><div class="row"><input id="c-redir" type="text" class="grow" placeholder="https://yoursite.com/new-page  or  /new-page" value="${esc(act && act.type === "redirect" ? act.value : "")}"></div>
+      <div class="muted" style="font-size:12.5px;margin-top:6px">Matching visitors are sent to this address (never in a loop, at most 3 times per visit). Best with a rule, “Page address starts with…” and “Once per visitor”.</div></div>
     <div class="lbl2" style="margin:16px 0 6px">3 · What counts as a conversion? <span class="muted">(optional)</span></div>
     <div class="row"><select id="c-goal" style="max-width:360px"><option value="">None — just count views and clicks</option>
       ${goals.filter(x => !x.archived).map(x => `<option value="${esc(x.id)}" ${cfg && cfg.goal_id === x.id ? "selected" : ""}>${esc(x.name)} — ${esc(GOAL_TYPE_LABEL[x.type])}</option>`).join("")}</select>
@@ -469,13 +475,23 @@ async function openCampaignModal(site, existing, opts = {}) {
   };
   const syncType = () => {
     const t = $("#c-type", el).value;
-    $("#p-simple", el).style.display = t === "custom" || t === "visual" ? "none" : "";
+    $("#p-simple", el).style.display = ["custom", "visual", "redirect"].includes(t) ? "none" : "";
+    $("#p-redirect", el).style.display = t === "redirect" ? "" : "none";
     $("#p-custom", el).style.display = t === "custom" ? "" : "none";
     $("#p-visual", el).style.display = t === "visual" ? "" : "none";
     ["#c-pos", "#c-align", "#c-size", "#c-fs", "#c-radius"].forEach(id => { $(id, el).style.display = t === "banner" ? "" : "none"; });
     $$("#p-simple label.muted", el).forEach(l => { if (/Text size|Corners/.test(l.textContent)) l.style.display = t === "banner" ? "" : "none"; });
     $("#c-title", el).closest(".field").style.display = t === "popup" ? "" : "none";
   };
+  const TRIG_HINT = { delay: ["seconds, e.g. 5", "Seconds on the page before it shows."], scroll: ["% of the page, e.g. 50", "Shows when they have scrolled this far."],
+    click: ["CSS selector, e.g. #buy-button", "Shows when a visitor clicks this element."], form: ["form name, e.g. contact", "Shows when this form is submitted (its id, name or action)."],
+    event: ["event name, e.g. add_to_cart", "Shows when the site calls OT.track('name')."], exit: ["", "Desktop only: when the mouse leaves through the top."],
+    session_start: ["", "Only on the first page of a visit."], load: ["", ""] };
+  const syncTrig = () => {
+    const t = $("#c-trig", el).value, h = TRIG_HINT[t];
+    $("#c-trigv", el).style.display = h[0] ? "" : "none"; $("#c-trigv", el).placeholder = h[0]; $("#c-trigh", el).textContent = h[1];
+  };
+  $("#c-trig", el).onchange = syncTrig; syncTrig();
   const syncCustom = () => {
     $("#c-inline-row", el).style.display = $("#c-display", el).value === "inline" ? "flex" : "none";
     const tr = $("#c-trigger", el).value;
@@ -549,8 +565,12 @@ async function openCampaignModal(site, existing, opts = {}) {
   };
 
   const buildBody = () => {
-    const aud = audience.get(), rules = aud.rules, common = { match: aud.match, segment_id: aud.segment_id, goal_id: g("#c-goal") };
+    const aud = audience.get(), rules = aud.rules, common = { match: aud.match, segment_id: aud.segment_id, goal_id: g("#c-goal"),
+      page_match: g("#c-pagematch"), trigger_type: g("#c-trig"), trigger_value: g("#c-trig") === "load" || g("#c-trig") === "exit" || g("#c-trig") === "session_start" ? "" : g("#c-trigv") };
     const type = g("#c-type");
+    if (type === "redirect") {
+      return { name: g("#c-name"), url_contains: g("#c-url"), ...common, frequency: g("#c-freq"), rules, actions: g("#c-redir") ? [{ type: "redirect", value: g("#c-redir") }] : [] };
+    }
     if (type === "visual") {
       return { name: g("#c-name"), url_contains: g("#c-url"), ...common, frequency: g("#c-freq"), rules,
         actions: EDITOR.changes.map(c => ({ type: "change", selector: c.selector, action: c.action, value: c.value, attr: c.attr || "" })) };
@@ -576,6 +596,7 @@ async function openCampaignModal(site, existing, opts = {}) {
   const pvConfig = () => {
     const body = buildBody();
     if (existing) body.id = existing.id;
+    if (body.actions[0] && body.actions[0].type === "redirect") { $("#c-err", el).textContent = "A redirect can't be previewed in a frame — save it, start it and test on the site."; return null; }
     if (!body.actions.length) { $("#c-err", el).textContent = "Make at least one change in the editor first."; return null; }
     if (body.actions[0].type === "custom" && !body.actions[0].html.trim() && !body.actions[0].js.trim()) { $("#c-err", el).textContent = "Add some HTML or JavaScript to preview."; return null; }
     if (!["custom", "change"].includes(body.actions[0].type) && !(body.actions[0].text || body.actions[0].title)) { $("#c-err", el).textContent = "Add a message to preview."; return null; }
