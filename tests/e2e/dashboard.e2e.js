@@ -127,6 +127,66 @@ async function api(path, method = "GET", body) {
   check("re-opening the campaign restores the design controls", m().querySelector("#c-fs").value === "24" && m().querySelector("#c-align").value === "left" && m().querySelector("#c-bold").checked && !m().querySelector("#c-close").checked && m().querySelector("#c-ctab").checked);
   m().querySelector("[data-close]").click(); await sleep(100);
 
+  // ---- advanced targeting: groups, URL parameter / cookie / JS variable, page scope, "when it shows", redirect
+  await go("campaigns");
+  await w.openCampaignModal(w.eval("curSite()"), null, {}); await sleep(500);
+  const fire = (e, ev = "change") => e.dispatchEvent(new w.Event(ev, { bubbles: true }));
+  const setSel = (e, v) => { e.value = v; fire(e); };
+  m().querySelector("#c-name").value = "UI advanced";
+  const top = () => m().querySelector("#ap-rules");
+  const topRows = () => Array.from(top().querySelectorAll(":scope > .row"));
+  setSel(top().querySelector("[data-rf]"), "traffic_source");
+  top().querySelector("[data-rv]").value = "organic";
+  top().querySelector("[data-rgadd]").click(); await sleep(50);                     // add a group
+  let box = top().querySelector("[data-gbox]");
+  check("a group box appears with its own nested builder", !!box && !!box.querySelector("[data-rf]"));
+  check("a group can't contain another group (no 'add a group' inside)", !box.querySelector("[data-rgadd]"));
+  setSel(box.querySelector("[data-rf]"), "device"); box.querySelector("[data-rv]").value = "mobile";
+  box.querySelector("[data-radd]").click(); await sleep(50);
+  box = top().querySelector("[data-gbox]");
+  const nested = box.querySelectorAll("[data-rf]");
+  check("nested builder keeps its first row and adds a second", nested.length === 2 && nested[0].value === "device");
+  setSel(nested[1], "city"); box.querySelectorAll("[data-rv]")[1].value = "Mumbai";
+  top().querySelector("[data-gm]").value = "any"; fire(top().querySelector("[data-gm]"));
+  top().querySelector(":scope > .row > [data-radd]").click(); await sleep(50);   // another top-level condition (the button under the group)
+  const rfs = Array.from(top().querySelectorAll("[data-rf]")).filter(e => !e.closest("[data-gbox]"));
+  setSel(rfs[rfs.length - 1], "__dyn:cookie"); await sleep(30);
+  const ra = Array.from(top().querySelectorAll("[data-ra]")).filter(e => !e.closest("[data-gbox]"));
+  ra[ra.length - 1].value = "tier";
+  const rvs = Array.from(top().querySelectorAll("[data-rv]")).filter(e => !e.closest("[data-gbox]"));
+  rvs[rvs.length - 1].value = "gold";
+  setSel(m().querySelector("#c-pagematch"), "starts"); m().querySelector("#c-url").value = "https://example.com/pricing";
+  setSel(m().querySelector("#c-trig"), "delay"); await sleep(30);
+  check("trigger value box + hint appear for 'after some time'", m().querySelector("#c-trigv").style.display !== "none" && /Seconds/.test(m().querySelector("#c-trigh").textContent));
+  m().querySelector("#c-trigv").value = "4";
+  m().querySelector("#c-text").value = "Advanced"; fire(m().querySelector("#c-text"), "input");
+  m().querySelector("#c-save").click(); await sleep(900);
+  const adv = (await api(`/api/sites/${site}/campaigns`)).find(c => c.name === "UI advanced");
+  const ac = adv && adv.config;
+  check("advanced campaign saved: top rule, group (any of 2), cookie rule, page scope and trigger",
+    ac && ac.rules[0].field === "traffic_source" && ac.rules[1].field === "__group" && ac.rules[1].match === "any" && ac.rules[1].rules.length === 2
+    && ac.rules[1].rules[1].field === "city" && ac.rules[2].field === "cookie.tier" && ac.rules[2].value === "gold"
+    && ac.page_match === "starts" && ac.url_contains === "https://example.com/pricing" && ac.trigger_type === "delay" && ac.trigger_value === "4", JSON.stringify(ac && { r: ac.rules, pm: ac.page_match, t: ac.trigger_type, tv: ac.trigger_value }));
+  check("campaign list explains the audience, trigger and page scope in words",
+    (await (async () => { await go("campaigns"); return d.querySelector("#view").textContent; })()).includes("after 4s on the page"));
+  // re-open: the builder restores the group and the named field
+  await w.openCampaignModal(w.eval("curSite()"), adv, {}); await sleep(500);
+  box = top().querySelector("[data-gbox]");
+  check("re-opening restores the group, its conditions, the cookie row and the trigger",
+    !!box && box.querySelectorAll("[data-rf]").length === 2 && box.querySelector("[data-gm]") === null && top().querySelector("[data-gm]").value === "any"
+    && Array.from(top().querySelectorAll("[data-ra]")).some(e => e.value === "tier") && m().querySelector("#c-trig").value === "delay" && m().querySelector("#c-trigv").value === "4" && m().querySelector("#c-pagematch").value === "starts");
+  m().querySelector("[data-close]").click(); await sleep(100);
+
+  // redirect campaign
+  await w.openCampaignModal(w.eval("curSite()"), null, {}); await sleep(500);
+  m().querySelector("#c-name").value = "UI redirect";
+  setSel(m().querySelector("#c-type"), "redirect");
+  check("redirect type shows the address box", m().querySelector("#p-redirect").style.display !== "none" && m().querySelector("#p-simple").style.display === "none");
+  m().querySelector("#c-redir").value = "/landing";
+  m().querySelector("#c-save").click(); await sleep(900);
+  const rd = (await api(`/api/sites/${site}/campaigns`)).find(c => c.name === "UI redirect");
+  check("redirect campaign saved", rd && rd.config.actions[0].type === "redirect" && rd.config.actions[0].value === "/landing", JSON.stringify(rd && rd.config.actions));
+
   // ---- settings page documents OT.identify
   t = await go("settings");
   check("settings page documents OT.identify", /OT\.q\.push\(\["identify"/.test(t));

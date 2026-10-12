@@ -4,71 +4,116 @@
 // ---------------------------------------------------------------- rule definitions (keep in sync with backend/rules.py and sdk.js)
 const RULE_GROUPS = [
   ["Who they are", [
-    ["returning", "Returning visitor", "true"], ["visit_no", "Visit number", "3"], ["days_since_last", "Days since last visit", "7"],
+    ["returning", "First-time or returning (true = returning)", "true"], ["visit_no", "Visit number", "3"], ["days_since_last", "Days since last visit", "7"],
     ["days_since_first", "Days since first visit", "30"], ["customer", "Is a customer", "true"], ["device", "Device", "mobile"],
     ["os", "Operating system", "ios, android, windows, macos, linux"], ["browser", "Browser", "chrome, safari, firefox, edge"],
-    ["language", "Browser language", "en, hi, fr"], ["country", "Country code", "IN, US"]]],
+    ["language", "Browser language", "en, hi, fr"], ["country", "Country code", "IN, US"], ["region", "State or region", "Maharashtra, California"],
+    ["city", "City", "Mumbai"]]],
   ["Where they came from", [
-    ["referrer_host", "Referrer website", "google.com"], ["search_keyword", "Search keyword", "running shoes"],
-    ["utm_source", "UTM source", "google"], ["utm_medium", "UTM medium", "cpc"], ["utm_campaign", "UTM campaign", "spring-sale"],
-    ["utm_term", "UTM term", "keyword"], ["utm_content", "UTM content", "banner-a"], ["referrer", "Full referrer URL", "facebook.com"],
-    ["landing_page", "Landing page of this visit", "/pricing"]]],
+    ["traffic_source", "Traffic source", "direct, organic, social, email, paid, referral"], ["referrer_host", "Referrer website", "google.com"],
+    ["search_keyword", "Search keyword", "running shoes"], ["utm_source", "UTM source", "google"], ["utm_medium", "UTM medium", "cpc"],
+    ["utm_campaign", "UTM campaign", "spring-sale"], ["utm_term", "UTM term", "keyword"], ["utm_content", "UTM content", "banner-a"],
+    ["referrer", "Full referrer URL", "facebook.com"], ["landing_page", "Landing page of this visit", "/pricing"]]],
   ["What they're doing", [
-    ["url", "Current page URL", "/checkout"], ["pages_viewed", "Pages viewed this visit", "3"], ["hour", "Hour of day (0–23)", "18"],
-    ["weekday", "Weekday (0 = Sunday)", "6"], ["did_event", "Has done an event", "purchase"]]],
+    ["url", "Page address (this page)", "/checkout"], ["pages_viewed", "Page count in this visit", "3"], ["total_pageviews", "Page views across all visits", "3"],
+    ["hour", "Hour of day (0–23)", "18"], ["weekday", "Day of week (0 = Sunday)", "6"], ["did_event", "Has done an event", "purchase"],
+    ["visited_page", "Has visited a page", "/pricing"]]],
 ];
+// Fields that take a name:  attr.plan, param.coupon, cookie.tier, var.user.plan
+const DYNAMIC_FIELDS = {
+  attr: ["Custom attribute (OT.identify)…", "attribute name, e.g. plan", "Your data"],
+  param: ["URL parameter (this page)…", "parameter name, e.g. coupon", "URL parameter"],
+  cookie: ["Cookie…", "cookie name, e.g. tier", "Cookie"],
+  var: ["JavaScript variable…", "window path, e.g. user.plan", "JS variable"],
+};
+const dynKind = f => Object.keys(DYNAMIC_FIELDS).find(k => (f || "").startsWith(k + "."));
 const RULE_FIELD_LABEL = Object.fromEntries(RULE_GROUPS.flatMap(([, f]) => f.map(([k, l]) => [k, l])));
 const RULE_HINT = Object.fromEntries(RULE_GROUPS.flatMap(([, f]) => f.map(([k, , h]) => [k, h])));
 const BOOL_FIELDS = new Set(["returning", "customer"]);
+const EXISTENCE_FIELDS = { did_event: "has done event", visited_page: "has visited a page containing" };
 const RULE_OPS = [["eq", "is"], ["neq", "is not"], ["gte", "≥"], ["lte", "≤"], ["contains", "contains"], ["not_contains", "doesn't contain"], ["in", "is one of"], ["starts", "starts with"]];
 const OP_LABEL = Object.fromEntries(RULE_OPS);
 
-const fieldLabel = f => f.startsWith("attr.") ? `Your data: ${f.slice(5)}` : (RULE_FIELD_LABEL[f] || f);
+function fieldLabel(f) {
+  const k = dynKind(f);
+  return k ? `${DYNAMIC_FIELDS[k][2]}: ${f.slice(k.length + 1)}` : (RULE_FIELD_LABEL[f] || f);
+}
 function ruleText(r) {
-  if (r.field === "did_event") return `${r.op === "neq" ? "has not done" : "has done"} event “${r.value}”`;
+  if (r.field === "__group") return "(" + (r.rules || []).map(ruleText).join(r.match === "any" ? " OR " : " AND ") + ")";
+  if (EXISTENCE_FIELDS[r.field]) return `${r.op === "neq" ? "has not " + EXISTENCE_FIELDS[r.field].replace(/^has /, "") : EXISTENCE_FIELDS[r.field]} “${r.value}”`;
   return `${fieldLabel(r.field)} ${OP_LABEL[r.op] || r.op} ${r.value === "" ? "…" : "“" + r.value + "”"}`;
 }
 const rulesText = (rules, match) => rules.length ? rules.map(ruleText).join(match === "any" ? "  OR  " : "  AND  ") : "Everyone";
 
-// ---------------------------------------------------------------- rule builder (rows of field / operator / value)
-function ruleBuilder(host, initial = [], { max = 10 } = {}) {
-  let rows = (initial || []).map(r => ({ ...r }));
+// ---------------------------------------------------------------- rule builder (rows of field / operator / value, plus groups)
+function ruleBuilder(host, initial = [], { max = 10, nested = false } = {}) {
+  let rows = (initial || []).map(r => ({ ...r, rules: r.rules ? r.rules.map(x => ({ ...x })) : undefined }));
   if (!rows.length) rows = [{ field: "", op: "eq", value: "" }];
-  const isAttr = f => f.startsWith("attr.");
+  let kids = {};
+  // only this builder's own controls -- a group's nested builder lives inside a [data-gbox] and handles its own
+  const own = sel => $$(sel, host).filter(e => { const g = e.closest("[data-gbox]"); return !g || g === host; });
+  const blank = () => ({ field: "", op: "eq", value: "" });
   const render = () => {
+    kids = {};
     host.innerHTML = rows.map((r, i) => {
-      const attr = isAttr(r.field);
-      const opts = r.field === "did_event" ? RULE_OPS.filter(([k]) => k === "eq" || k === "neq").map(([k, l]) => [k, k === "eq" ? "has done" : "has not done"]) : RULE_OPS;
+      if (r.field === "__group") {
+        return `<div style="border:1px solid var(--border-strong);border-radius:10px;padding:10px;margin-bottom:8px;background:var(--surface-2)">
+          <div class="row" style="margin-bottom:6px"><span class="lbl2">Group</span>
+            <select data-gm="${i}" style="width:120px"><option value="all" ${r.match !== "any" ? "selected" : ""}>all of</option><option value="any" ${r.match === "any" ? "selected" : ""}>any of</option></select>
+            <span class="muted">these conditions</span><button class="btn sm" type="button" data-rx="${i}">Remove group</button></div>
+          <div data-gbox="${i}"></div></div>`;
+      }
+      const dk = dynKind(r.field), attrName = dk ? r.field.slice(dk.length + 1) : "";
+      const exist = EXISTENCE_FIELDS[r.field];
+      const opts = exist ? [["eq", "has"], ["neq", "has not"]] : RULE_OPS;
       const valueEl = BOOL_FIELDS.has(r.field)
         ? `<select data-rv="${i}" style="width:130px"><option value="true" ${r.value !== "false" ? "selected" : ""}>true</option><option value="false" ${r.value === "false" ? "selected" : ""}>false</option></select>`
-        : `<input data-rv="${i}" type="text" class="grow" placeholder="${esc(attr ? "value, e.g. pro or 100" : (RULE_HINT[r.field] || "value"))}" value="${esc(r.value)}">`;
+        : `<input data-rv="${i}" type="text" class="grow" placeholder="${esc(dk ? "value, e.g. pro or 100" : (RULE_HINT[r.field] || "value"))}" value="${esc(r.value)}">`;
       return `<div class="row" style="margin-bottom:8px">
-        <select data-rf="${i}" style="width:230px"><option value="">${i ? "(choose a field)" : "Choose who…"}</option>
+        <select data-rf="${i}" style="width:250px"><option value="">${i ? "(choose a field)" : "Choose who…"}</option>
           ${RULE_GROUPS.map(([g, fs]) => `<optgroup label="${esc(g)}">${fs.map(([k, l]) => `<option value="${k}" ${r.field === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</optgroup>`).join("")}
-          <optgroup label="Your own data"><option value="__attr" ${attr ? "selected" : ""}>Custom attribute (OT.identify)…</option></optgroup></select>
-        ${attr ? `<input data-ra="${i}" type="text" style="width:130px" placeholder="attribute name" value="${esc(r.field.slice(5))}">` : ""}
+          <optgroup label="Read from the page / your data">${Object.entries(DYNAMIC_FIELDS).map(([k, [l]]) => `<option value="__dyn:${k}" ${dk === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</optgroup></select>
+        ${dk ? `<input data-ra="${i}" type="text" style="width:190px" placeholder="${esc(DYNAMIC_FIELDS[dk][1])}" value="${esc(attrName)}">` : ""}
         <select data-ro="${i}" style="width:130px">${opts.map(([k, l]) => `<option value="${k}" ${r.op === k ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
         ${valueEl}<button class="btn sm" type="button" data-rx="${i}" aria-label="Remove rule" ${rows.length === 1 && !r.field ? "disabled" : ""}>✕</button></div>`;
-    }).join("") + (rows.length < max ? `<button class="btn sm" type="button" data-radd>＋ Add a rule</button>` : "");
-    $$("[data-rf]", host).forEach(s => s.onchange = () => {
+    }).join("") + (rows.length < max ? `<div class="row"><button class="btn sm" type="button" data-radd>＋ Add a condition</button>${nested ? "" : `<button class="btn sm" type="button" data-rgadd>＋ Add a group</button>`}</div>` : "");
+    rows.forEach((r, i) => { if (r.field === "__group") { const box = $(`[data-gbox="${i}"]`, host); kids[i] = ruleBuilder(box, r.rules || [], { max: 10, nested: true }); } });
+    own("[data-rf]").forEach(s => s.onchange = () => {
       const i = +s.dataset.rf; sync();
-      if (s.value === "__attr") rows[i].field = "attr.";
-      else { rows[i].field = s.value; if (rows[i].field === "did_event" && !["eq", "neq"].includes(rows[i].op)) rows[i].op = "eq"; if (BOOL_FIELDS.has(s.value)) rows[i].value = "true"; }
+      if (s.value.startsWith("__dyn:")) rows[i].field = s.value.slice(6) + ".";
+      else {
+        rows[i].field = s.value;
+        if (EXISTENCE_FIELDS[s.value] && !["eq", "neq"].includes(rows[i].op)) rows[i].op = "eq";
+        if (BOOL_FIELDS.has(s.value)) rows[i].value = "true";
+      }
       render();
     });
-    $$("[data-rx]", host).forEach(b => b.onclick = () => { sync(); rows.splice(+b.dataset.rx, 1); if (!rows.length) rows = [{ field: "", op: "eq", value: "" }]; render(); });
-    const add = $("[data-radd]", host); if (add) add.onclick = () => { sync(); rows.push({ field: "", op: "eq", value: "" }); render(); };
+    own("[data-rx]").forEach(b => b.onclick = () => { sync(); rows.splice(+b.dataset.rx, 1); if (!rows.length) rows = [blank()]; render(); });
+    const add = own("[data-radd]")[0]; if (add) add.onclick = () => { sync(); rows.push(blank()); render(); };
+    const addg = own("[data-rgadd]")[0]; if (addg) addg.onclick = () => { sync(); rows.push({ field: "__group", op: "eq", value: "", match: "any", rules: [blank()] }); render(); };
   };
   const sync = () => {
-    $$("[data-rf]", host).forEach(s => { const i = +s.dataset.rf; if (s.value !== "__attr" && s.value) rows[i].field = s.value; });
-    $$("[data-ra]", host).forEach(inp => { const i = +inp.dataset.ra; rows[i].field = "attr." + inp.value.trim().replace(/[^A-Za-z0-9_]/g, "").slice(0, 29); });
-    $$("[data-ro]", host).forEach(s => { rows[+s.dataset.ro].op = s.value; });
-    $$("[data-rv]", host).forEach(inp => { rows[+inp.dataset.rv].value = inp.value.trim(); });
+    own("[data-rf]").forEach(s => { const i = +s.dataset.rf; if (!s.value.startsWith("__dyn:") && s.value) rows[i].field = s.value; });
+    own("[data-ra]").forEach(inp => {
+      const i = +inp.dataset.ra, k = dynKind(rows[i].field);
+      const clean = k === "var" ? inp.value.trim().replace(/[^A-Za-z0-9_$.]/g, "") : k === "cookie" ? inp.value.trim().replace(/[^A-Za-z0-9_\-]/g, "") : inp.value.trim().replace(/[^A-Za-z0-9_.\-\[\]]/g, "");
+      rows[i].field = k + "." + clean.slice(0, 60);
+    });
+    own("[data-ro]").forEach(s => { rows[+s.dataset.ro].op = s.value; });
+    own("[data-rv]").forEach(inp => { rows[+inp.dataset.rv].value = inp.value.trim(); });
+    own("[data-gm]").forEach(s => { rows[+s.dataset.gm].match = s.value; });
+    Object.keys(kids).forEach(i => { rows[+i].rules = kids[i].get(); });
   };
   render();
   return {
-    get() { sync(); return rows.filter(r => r.field && r.field !== "attr.").map(r => ({ field: r.field, op: r.op, value: r.value })); },
-    set(list) { rows = (list || []).map(r => ({ ...r })); if (!rows.length) rows = [{ field: "", op: "eq", value: "" }]; render(); },
+    get() {
+      sync();
+      return rows.map(r => {
+        if (r.field === "__group") return (r.rules && r.rules.length) ? { field: "__group", op: "eq", value: "", match: r.match === "any" ? "any" : "all", rules: r.rules } : null;
+        return r.field && !r.field.endsWith(".") ? { field: r.field, op: r.op, value: r.value } : null;
+      }).filter(Boolean);
+    },
+    set(list) { rows = (list || []).map(r => ({ ...r, rules: r.rules ? r.rules.map(x => ({ ...x })) : undefined })); if (!rows.length) rows = [blank()]; render(); },
   };
 }
 
@@ -84,7 +129,7 @@ function audiencePicker(host, site, segments, initial = {}) {
     <div id="ap-rules"></div>
     <div id="ap-save" class="row" style="margin-top:6px"><input id="ap-name" type="text" style="width:220px" placeholder="Name to save these rules as an audience">
       <button class="btn sm" type="button" id="ap-save-btn">Save as audience</button><span class="muted" style="font-size:12.5px">Reuse the same people in other campaigns and tests.</span></div>
-    <div class="muted" style="font-size:12.5px;margin-top:8px">Leave the rules empty to show it to everyone. A <b>visit</b> is a new session — 30 minutes after the previous page view.</div>`;
+    <div class="muted" style="font-size:12.5px;margin-top:8px">Leave the rules empty to show it to everyone. Use a <b>group</b> for “this AND (that OR that)”. A <b>visit</b> is a new session — 30 minutes after the previous page view.</div>`;
   const builder = ruleBuilder($("#ap-rules", host), curSeg ? [] : (initial.rules || []));
   const apply = () => {
     const id = $("#ap-seg", host).value, seg = segments.find(s => s.id === id);
@@ -124,6 +169,8 @@ const STARTER_AUDIENCES = [
   ["Came from Google", "Arrived from a Google search or ad.", "all", [{ field: "referrer_host", op: "contains", value: "google" }]],
   ["Engaged (3+ pages)", "Viewed three or more pages this visit.", "all", [{ field: "pages_viewed", op: "gte", value: "3" }]],
   ["Customers", "Bought before or flagged as a customer.", "all", [{ field: "customer", op: "eq", value: "true" }]],
+  ["Organic search visitors", "Arrived from a search engine.", "all", [{ field: "traffic_source", op: "eq", value: "organic" }]],
+  ["Mumbai visitors", "Located in Mumbai (needs the host's location headers).", "all", [{ field: "city", op: "eq", value: "Mumbai" }]],
 ];
 
 async function pageAudiences(view) {

@@ -210,10 +210,17 @@ async function pageExperiments(view) {
 }
 
 // ---------------------------------------------------------------- Personalization
+const TRIGGER_TEXT = { load: "on each page view", session_start: "at the start of a visit", delay: "after {v}s on the page", scroll: "after scrolling {v}%", exit: "when about to leave",
+  click: "on clicking {v}", form: "on submitting form {v}", event: "on event {v}" };
+function triggerText(cfg) {
+  const t = (TRIGGER_TEXT[cfg.trigger_type || "load"] || "").replace("{v}", cfg.trigger_value || "");
+  const pm = cfg.url_contains ? ({ starts: "pages starting with", equals: "only", contains: "pages containing", all: "" }[cfg.page_match || "contains"] + " " + cfg.url_contains).trim() : "all pages";
+  return `${t} · ${pm}`;
+}
 function actionSummary(actions) {
   const n = {};
   actions.forEach(a => { n[a.type] = (n[a.type] || 0) + 1; });
-  const names = { change: k => `${k} page edit${k > 1 ? "s" : ""}`, banner: () => "banner", popup: () => "popup", custom: () => "custom code / form" };
+  const names = { change: k => `${k} page edit${k > 1 ? "s" : ""}`, banner: () => "banner", popup: () => "popup", custom: () => "custom code / form", redirect: () => "redirect" };
   return Object.entries(n).map(([t, k]) => (names[t] ? names[t](k) : t)).join(" + ");
 }
 async function pageCampaigns(view) {
@@ -224,7 +231,7 @@ async function pageCampaigns(view) {
     <div class="card">${camps.length ? `<div class="table-wrap"><table><thead><tr><th>Campaign</th><th>Status</th><th>Who sees it</th><th>Shown</th><th class="right">Seen by</th><th class="right">Clicked</th><th class="right">Converted</th><th></th></tr></thead><tbody>
       ${camps.map(c => `<tr><td><b>${esc(c.name)}</b><div class="muted">${esc(actionSummary(c.config.actions))}</div></td><td><span class="pill ${esc(c.status)}">${esc(c.status)}</span></td>
         <td class="muted">${(() => { const sg = c.config.segment_id && segs.find(x => x.id === c.config.segment_id); return sg ? `<b>${esc(sg.name)}</b><div>${esc(rulesText(sg.rules, sg.match))}</div>` : esc(rulesText(c.config.rules, c.config.match)); })()}</td>
-        <td class="muted">${esc({ once: "Once per visitor", session: "Once per visit", always: "Every page load" }[c.config.frequency])}</td>
+        <td class="muted">${esc({ once: "Once per visitor", session: "Once per visit", always: "Every page load" }[c.config.frequency])}<div>${esc(triggerText(c.config))}</div></td>
         <td class="right">${fmtNum(c.impressions)}</td><td class="right">${fmtNum(c.clicks)}</td><td class="right">${fmtNum(c.conversions)}</td>
         <td class="right nowrap"><button class="btn sm" data-edit-camp="${esc(c.id)}">Edit</button> ${statusButtons("campaigns", c.id, c.status)}</td></tr>`).join("")}</tbody></table></div>`
       : `<div class="empty"><b>No campaigns yet</b>Try: “Returning visitor → welcome-back banner”, or “3rd visit → show a signup form” (HubSpot, Typeform, Google Forms or your own HTML/CSS/JS).<br><br><button class="btn primary" id="new-visual-2">✎ Edit your page visually</button> <button class="btn" id="new-camp-2">＋ Banner / popup / form</button></div>`}</div>`;

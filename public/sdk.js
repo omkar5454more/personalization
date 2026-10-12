@@ -217,8 +217,24 @@
   }
   // pages viewed in the current visit and the page the visit started on
   function countPage() {
-    if (st.pvSid !== st.sid) { st.pvSid = st.sid; st.pvN = 0; st.landing = pageUrl(); }
+    if (st.pvSid !== st.sid) { st.pvSid = st.sid; st.pvN = 0; st.landing = pageUrl(); st.vsrc = classifySource(); }
     st.pvN = (st.pvN || 0) + 1;
+    st.tp = (st.tp || 0) + 1;                                   // page views across ALL visits (a refresh counts)
+    st.paths = st.paths || [];
+    var pth = location.pathname.toLowerCase().slice(0, 80);
+    if (st.paths.indexOf(pth) === -1 && st.paths.length < 60) st.paths.push(pth);
+  }
+  // How this visit started: paid (utm_medium cpc/ppc/...), email, organic search, social, referral (another site) or direct.
+  function classifySource() {
+    var q = new URLSearchParams(location.search), med = (q.get("utm_medium") || "").toLowerCase(), src = (q.get("utm_source") || "").toLowerCase();
+    var host = ""; try { host = new URL(document.referrer).hostname.replace(/^www\./, "").toLowerCase(); } catch (e) {}
+    if (/^(cpc|ppc|paid|paidsearch|paid_social|paidsocial|display|cpm|banner)$/.test(med)) return "paid";
+    if (med === "email" || /mail/.test(src)) return "email";
+    if (host && host === location.hostname.replace(/^www\./, "").toLowerCase()) host = "";   // our own site is not a source
+    if (!host) return (med || src) ? "other" : "direct";
+    if (/(^|\.)(google|bing|yahoo|duckduckgo|baidu|yandex|ecosia|brave|startpage|ask)\./.test(host)) return "organic";
+    if (/(facebook|instagram|linkedin|twitter|^x\.com|^t\.co|youtube|youtu\.be|pinterest|reddit|whatsapp|telegram|tiktok|snapchat)/.test(host)) return "social";
+    return "referral";
   }
   function refHost() { try { return new URL(st.ref || document.referrer).hostname.replace(/^www\./, ""); } catch (e) { return ""; } }
   function osName() {
@@ -233,7 +249,8 @@
     var w = Math.min(window.innerWidth || 1024, screen.width || 1024);
     return w < 768 ? "mobile" : w < 1024 ? "tablet" : "desktop";
   }
-  function context(country) {
+  function context(geo) {
+    geo = (geo && typeof geo === "object") ? geo : { country: geo || "" };
     var d = new Date();
     var c = {
       returning: String(visitor.isReturning), visit_no: visitor.visitNo,
@@ -241,7 +258,8 @@
       utm_source: st.utm.utm_source || "", utm_medium: st.utm.utm_medium || "",
       utm_campaign: st.utm.utm_campaign || "", utm_term: st.utm.utm_term || "", utm_content: st.utm.utm_content || "",
       device: deviceType(), os: osName(), browser: browserName(), language: (navigator.language || "").slice(0, 2).toLowerCase(),
-      country: (country || "").toUpperCase(), hour: d.getHours(), weekday: d.getDay(),
+      country: (geo.country || "").toUpperCase(), region: geo.region || "", city: geo.city || "", hour: d.getHours(), weekday: d.getDay(),
+      traffic_source: st.vsrc || "direct", total_pageviews: st.tp || 1,
       url: location.href, referrer: st.ref || document.referrer || "", referrer_host: refHost(),
       search_keyword: st.kw || "", landing_page: st.landing || pageUrl(), pages_viewed: st.pvN || 1,
       customer: String(st.attrs.customer === true || String(st.attrs.customer).toLowerCase() === "true" || (st.done.purchase || 0) > 0)
@@ -254,7 +272,15 @@
       var did = (st.done[r.value] || 0) > 0;
       return r.op === "neq" ? !did : did;
     }
-    var actual = ctx[r.field], want = r.value;
+    if (r.field === "visited_page") {   // has the visitor ever opened a page whose address contains this text?
+      var vis = (st.paths || []).some(function (p) { return p.indexOf(String(r.value).toLowerCase()) !== -1; });
+      return r.op === "neq" ? !vis : vis;
+    }
+    var actual, want = r.value;
+    if (r.field.indexOf("param.") === 0) actual = urlParam(r.field.slice(6));
+    else if (r.field.indexOf("cookie.") === 0) actual = cookieValue(r.field.slice(7));
+    else if (r.field.indexOf("var.") === 0) actual = windowVar(r.field.slice(4));
+    else actual = ctx[r.field];
     if (actual === undefined) return false;
     var an = Number(actual), wn = Number(want), numeric = !isNaN(an) && want !== "" && !isNaN(wn);
     switch (r.op) {
@@ -269,10 +295,39 @@
     }
     return false;
   }
+  // values that are read live from the page rather than from the saved visitor facts
+  function urlParam(name) { try { return new URLSearchParams(location.search).get(name) || ""; } catch (e) { return ""; } }
+  function cookieValue(name) {
+    var m = document.cookie.split("; ");
+    for (var i = 0; i < m.length; i++) { var kv = m[i].split("="); if (kv[0] === name) { try { return decodeURIComponent(kv.slice(1).join("=")); } catch (e) { return kv.slice(1).join("="); } } }
+    return "";
+  }
+  function windowVar(path) {   // plain property reads only (no code is evaluated); objects / functions count as empty
+    var v = window, parts = path.split(".");
+    try { for (var i = 0; i < parts.length; i++) { if (v === null || v === undefined) return ""; v = v[parts[i]]; } } catch (e) { return ""; }
+    return (typeof v === "string" || typeof v === "number" || typeof v === "boolean") ? String(v) : "";
+  }
+  function evalRule(r, ctx) {
+    if (r.field === "__group") {
+      var t = function (x) { return ruleMatches(x, ctx); };
+      return !r.rules || !r.rules.length ? true : (r.match === "any" ? r.rules.some(t) : r.rules.every(t));
+    }
+    return ruleMatches(r, ctx);
+  }
+  // Which pages it runs on: every page, address starts with, contains, or is exactly (query string and #hash ignored for starts/exactly).
+  function pageMatches(c) {
+    var mode = c.page_match || "contains", v = (c.url_contains || "").trim().toLowerCase();
+    if (mode === "all" || !v) return true;
+    var full = location.href.toLowerCase(), bare = full.split("#")[0].split("?")[0], path = location.pathname.toLowerCase();
+    var strip = function (x) { return x.replace(/\/+$/, ""); };
+    if (mode === "starts") return bare.indexOf(v) === 0 || path.indexOf(v) === 0;
+    if (mode === "equals") return strip(bare) === strip(v) || strip(path) === strip(v);
+    return full.indexOf(v) !== -1;
+  }
   function campaignMatches(c, ctx) {
-    if (c.url_contains && location.href.indexOf(c.url_contains) === -1) return false;
+    if (!pageMatches(c)) return false;
     if (!c.rules || !c.rules.length) return true;
-    var test = function (r) { return ruleMatches(r, ctx); };
+    var test = function (r) { return evalRule(r, ctx); };
     return c.match === "any" ? c.rules.some(test) : c.rules.every(test);
   }
   function frequencyAllows(c) {
@@ -465,6 +520,37 @@
       document.addEventListener("mouseout", h);
     } else once();
   }
+  // "When it shows" for a whole campaign: each page view (default) | first page of a visit | after N seconds | scroll % |
+  // exit intent | a click on an element | a form submit | a custom event. Deferred triggers re-check the audience and
+  // frequency at the moment they fire, and are armed once per campaign per page load.
+  var lastGeo = null, trigBound = {};
+  function armCampaignTrigger(c, go) {
+    var t = c.trigger_type || "load", v = String(c.trigger_value || "");
+    if (t === "load") return go();
+    if (t === "session_start") { if ((st.pvN || 1) <= 1) go(); return; }
+    var key = c.id + ":" + t;
+    if (trigBound[key]) return; trigBound[key] = 1;
+    var fired = false;
+    function guarded() {
+      if (fired || !frequencyAllows(c) || !campaignMatches(c, context(lastGeo))) return;
+      fired = true; go();
+    }
+    if (t === "delay") setTimeout(guarded, Math.max(0, parseInt(v, 10) || 0) * 1000);
+    else if (t === "scroll") {
+      var want = parseInt(v, 10) || 50;
+      var chk = function () { if (scrollPct() >= want) { window.removeEventListener("scroll", chk); guarded(); } };
+      window.addEventListener("scroll", chk, { passive: true }); chk();
+    } else if (t === "exit") {
+      var h = function (e) { if (!e.relatedTarget && e.clientY <= 0) { document.removeEventListener("mouseout", h); guarded(); } };
+      document.addEventListener("mouseout", h);
+    } else if (t === "click") {
+      document.addEventListener("click", function (ev) { try { if (ev.target.closest && ev.target.closest(v)) guarded(); } catch (e) {} }, true);
+    } else if (t === "form") {
+      document.addEventListener("submit", function (ev) {
+        if (ev.target && ev.target.tagName === "FORM" && formId(ev.target).toLowerCase().indexOf(v.toLowerCase()) !== -1) guarded();
+      }, true);
+    } else if (t === "event") window.addEventListener("ot:event:" + v, guarded);
+  }
   var armedCustom = {};
   function runCampaign(c) {
     var announced = false;
@@ -473,18 +559,33 @@
       markShown(c); push({ type: "impression", exp: c.id, variant: "shown" });
       if (c.goal) watchGoal(c, "shown");     // conversion on the campaign's chosen goal, counted after it was shown
     }
-    c.actions.forEach(function (a, i) {
-      if (a.type === "custom") {
-        var key = c.id + ":" + i;
-        if (armedCustom[key]) return; armedCustom[key] = 1;
-        onBody(function () { armTrigger(a, function () { renderCustom(c, a, announce); }); });
-        return;
-      }
-      announce();
-      if (a.type === "banner") showBanner(c, a);
-      else if (a.type === "popup") showPopup(c, a);
-      else if (a.type === "change") applyWithRetry([{ selector: a.selector, action: a.action, value: a.value, attr: a.attr }]);
-    });
+    var deferred = !!c.trigger_type && c.trigger_type !== "load";
+    function go() {
+      c.actions.forEach(function (a, i) {
+        if (a.type === "custom") {
+          var key = c.id + ":" + i;
+          if (armedCustom[key]) return; armedCustom[key] = 1;
+          // the campaign-level trigger replaces the code action's own trigger
+          onBody(function () { armTrigger(deferred ? { trigger: "load" } : a, function () { renderCustom(c, a, announce); }); });
+          return;
+        }
+        if (a.type === "redirect") {
+          var abs; try { abs = new URL((a.value || "").trim(), location.href).href; } catch (e) { return; }
+          var cur = location.href.split("#")[0], tgt = abs.split("#")[0];
+          if (tgt.indexOf("?") === -1) cur = cur.split("?")[0];                         // a target without a query matches the page whatever its query
+          if (cur === tgt) return;                                                       // already there: never loop
+          if (st.rdSid !== st.sid) { st.rdSid = st.sid; st.rdN = 0; }
+          if (++st.rdN > 3) return;                                                     // at most 3 redirects per visit
+          announce(); saveState(st); flush(); location.replace(abs);
+          return;
+        }
+        announce();
+        if (a.type === "banner") showBanner(c, a);
+        else if (a.type === "popup") showPopup(c, a);
+        else if (a.type === "change") applyWithRetry([{ selector: a.selector, action: a.action, value: a.value, attr: a.attr }]);
+      });
+    }
+    armCampaignTrigger(c, go);
   }
   function onBody(fn) { if (document.body) fn(); else document.addEventListener("DOMContentLoaded", fn); }
   // Visitor context (the facts rules are tested against), built once per page. The country lookup is a network
@@ -492,12 +593,13 @@
   var geoPromise = null;
   function getContext(cfg) {
     var all = ((cfg && cfg.campaigns) || []).concat((cfg && cfg.experiments) || []);
-    var needsGeo = all.some(function (c) { return (c.rules || []).some(function (r) { return r.field === "country"; }); });
-    if (!needsGeo) return Promise.resolve(context(""));
+    var geoField = function (r) { return r.field === "country" || r.field === "region" || r.field === "city" || (r.field === "__group" && (r.rules || []).some(geoField)); };
+    var needsGeo = all.some(function (c) { return (c.rules || []).some(geoField); });
+    if (!needsGeo) return Promise.resolve(context(lastGeo));
     if (!geoPromise) {
-      geoPromise = fetch(ORIGIN + "/ctx").then(function (r) { return r.json(); }).then(function (j) { return j.country; }).catch(function () { return ""; });
+      geoPromise = fetch(ORIGIN + "/ctx").then(function (r) { return r.json(); }).catch(function () { return {}; });
     }
-    return geoPromise.then(function (country) { return context(country); });
+    return geoPromise.then(function (geo) { lastGeo = geo; return context(geo); });
   }
   function runCampaigns(list, ctx) {
     (list || []).forEach(function (c) {

@@ -88,6 +88,18 @@ hour, weekday and "has done event X". Add your own with `OT.identify({...})` (up
 `attr.<name>`. Code can call it before the SDK has loaded: `window.OT = window.OT || {q: []}; OT.q.push(["identify", {plan: "pro"}])`.
 `OT.track("purchase")` also marks the visitor as a customer for the "customer" and "has done event" rules.
 
+## More targeting, triggers and redirects
+- **More conditions:** state/region and city (from the host's geo headers on Vercel/Cloudflare -- no IP is read or stored; states of India and
+  the US are mapped to names), traffic source (direct / organic / social / email / paid / referral / other, decided per visit), URL parameter
+  of the current page, a cookie, a JavaScript variable on the page (`var.user.plan`, plain property reads only), "has visited a page", page count
+  of this visit, and page views across all visits (a refresh counts).
+- **Groups:** a condition can be a group with its own all/any, e.g. `plan = pro AND (device = mobile OR source = organic)` (one level deep).
+- **Where it runs:** all pages, address starts with, contains, or this page only (query string and #hash ignored for starts / exactly).
+- **When it shows** (any campaign type): on each page view, first page of a visit, after N seconds, on scroll %, exit intent (desktop), click on
+  an element, form submit, or a custom event (`OT.track("name")`). Deferred triggers re-check the audience and frequency when they fire.
+- **Redirect action:** send matching visitors to another address (never in a loop, at most 3 per visit; only `https://…` or a single-slash path).
+- Not built (on purpose or not yet): matching by company / IP range (we never store IPs), pushing campaign names to Google Analytics, teams and roles.
+
 ## Tests
     python -m pytest tests          # stats + API (uses a throw-away database)
     tests/e2e                       # the real SDK and dashboard scripts in jsdom -- see tests/e2e/README.md
